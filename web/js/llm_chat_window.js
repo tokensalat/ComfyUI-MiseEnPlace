@@ -630,7 +630,7 @@ function buildChatWidget(node) {
     const textInput = document.createElement("textarea");
     textInput.className = "miseenplace-chat-input";
     textInput.rows = INPUT_MIN_ROWS;
-    textInput.placeholder = "Type a message - Enter to send, Shift+Enter for a new line...";
+    textInput.placeholder = "Type a message - Ctrl+Enter to send...";
     const sendBtn = document.createElement("button");
     sendBtn.className = "miseenplace-chat-send";
     sendBtn.textContent = "Send";
@@ -658,7 +658,11 @@ function buildChatWidget(node) {
         // Otherwise the canvas sees the keystrokes too and fires its shortcuts
         // while you are typing - the frontend's own textarea widgets do this.
         e.stopPropagation();
-        if (e.key === "Enter" && !e.shiftKey) {
+        // Ctrl+Enter (Cmd+Enter on macOS) sends; plain Enter just inserts a
+        // newline like a normal textarea, since replies are long enough that
+        // an accidental Enter mid-thought sending the message is more
+        // disruptive than the extra keystroke to send on purpose.
+        if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
             e.preventDefault();
             send();
         }

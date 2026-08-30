@@ -1,0 +1,54 @@
+{
+  "1": {
+    "class_type": "ListCombinator",
+    "inputs": {"list_a": "euler, dpmpp_2m", "list_b": "normal, karras"},
+    "_meta": {"title": "List Combinator"}
+  },
+  "2": {
+    "class_type": "SamplerSchedulerLooper",
+    "inputs": {"combinations": ["1", 0], "index_in": 1},
+    "_meta": {"title": "Step through combinations"}
+  },
+  "3": {
+    "class_type": "MarkdownViewer",
+    "inputs": {
+      "markdown": ["2", 3],
+      "heading": "Sweep Step",
+      "history_id": "sweep_demo_view",
+      "max_entries": 50,
+      "append": true,
+      "clear_first": false
+    },
+    "_meta": {"title": "Sweep status"}
+  },
+  "4": {
+    "class_type": "SamplerSchedulerSelector",
+    "inputs": {"sampler": "euler", "scheduler": "karras"},
+    "_meta": {"title": "Pick one manually"}
+  },
+  "5": {
+    "class_type": "StringFormatter",
+    "inputs": {
+      "prefix": "render",
+      "video_model": "wan22",
+      "sampler": ["4", 0],
+      "scheduler": ["4", 1],
+      "index": 7,
+      "runtime": 42.5,
+      "string_format": "{prefix}-{video_model}-{sampler}-{scheduler}-{index}-{runtime:.0f}s"
+    },
+    "_meta": {"title": "String Formatter"}
+  },
+  "6": {
+    "class_type": "MarkdownViewer",
+    "inputs": {
+      "markdown": ["5", 0],
+      "heading": "Formatted Tag",
+      "history_id": "sweep_demo_view",
+      "max_entries": 50,
+      "append": true,
+      "clear_first": false
+    },
+    "_meta": {"title": "Formatted tag"}
+  }
+}

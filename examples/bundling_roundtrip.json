@@ -1,0 +1,68 @@
+{
+  "1": {
+    "class_type": "PrimitiveString",
+    "inputs": {"value": "Ada Lovelace"},
+    "_meta": {"title": "name"}
+  },
+  "2": {
+    "class_type": "PrimitiveInt",
+    "inputs": {"value": 30},
+    "_meta": {"title": "age"}
+  },
+  "3": {
+    "class_type": "PrimitiveFloat",
+    "inputs": {"value": 9.5},
+    "_meta": {"title": "score"}
+  },
+  "4": {
+    "class_type": "Bundler",
+    "inputs": {
+      "keys": "name,age,score",
+      "items.item0": ["1", 0],
+      "items.item1": ["2", 0],
+      "items.item2": ["3", 0]
+    },
+    "_meta": {"title": "Bundler"}
+  },
+  "5": {
+    "class_type": "PrimitiveString",
+    "inputs": {"value": "Grace Hopper"},
+    "_meta": {"title": "override for name"}
+  },
+  "6": {
+    "class_type": "Piercer",
+    "inputs": {
+      "bundle": ["4", 0],
+      "keys": "name",
+      "overrides.override0": ["5", 0]
+    },
+    "_meta": {"title": "Piercer (overrides name)"}
+  },
+  "7": {
+    "class_type": "Unbundler",
+    "inputs": {"bundle": ["6", 0], "keys": "name,age,score"},
+    "_meta": {"title": "Unbundler"}
+  },
+  "8": {
+    "class_type": "TextConcat",
+    "inputs": {
+      "parts.text0": ["7", 0],
+      "parts.text1": ["7", 1],
+      "parts.text2": ["7", 2],
+      "separator": " | "
+    },
+    "_meta": {"title": "Join extracted values"}
+  },
+  "9": {
+    "class_type": "MarkdownViewer",
+    "inputs": {
+      "markdown": ["8", 0],
+      "heading": "Bundling Roundtrip",
+      "history_id": "bundling_demo_view",
+      "max_entries": 50,
+      "append": true,
+      "clear_first": false
+    },
+    "_meta": {"title": "Result"}
+  }
+}

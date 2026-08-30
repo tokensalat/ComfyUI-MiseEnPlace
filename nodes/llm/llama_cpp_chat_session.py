@@ -375,6 +375,15 @@ class LlamaCppChatSession:
                         "tooltip": "Appended to 'message' before sending (after a blank line, if both are non-empty). Wire in text from elsewhere without overwriting the message widget - the same way 'images' attaches images without touching it.",
                     },
                 ),
+                # Newest, so it goes after append_text for the same
+                # positional-saving reason noted on resend_on_image_change.
+                "resend_on_append_text_change": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "Off: a new turn is only generated when 'message' or a setting changes - updating 'append_text' on its own (e.g. from a live data source feeding it) reuses the last reply. On: a change to 'append_text' alone also generates a new turn.",
+                    },
+                ),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -500,13 +509,16 @@ class LlamaCppChatSession:
         compact_keep_turns=2,  # read by the Compact button, not by run()
         json_schema="",
         append_text="",
+        resend_on_append_text_change=True,
         unique_id=None,
     ):
         sid = self._resolve_session_id(session_id, unique_id)
 
-        # Folded in once, here, so every later use of "the user's text" -
-        # fingerprint, history, the outgoing payload - already reflects it
-        # rather than each having to remember to combine the two.
+        # Folded in once, here, so every later use of "the user's text" - the
+        # history and the outgoing payload - already reflects it rather than
+        # each having to remember to combine the two. The fingerprint below
+        # uses 'message' and 'extra_text' separately instead, so that
+        # resend_on_append_text_change can drop the latter from the hash.
         extra_text = (append_text or "").strip()
         full_message = f"{message}\n\n{extra_text}" if (message and extra_text) else (message or extra_text)
 
@@ -536,18 +548,22 @@ class LlamaCppChatSession:
 
         # Fingerprinted from the *resolved* settings, so turning a knob on the
         # shared config node counts as a change here too - see _fingerprint().
-        fingerprint = self._fingerprint(
-            dict(
-                settings,
-                message=full_message,
-                session_id=sid,
-                max_history_turns=max_history_turns,
-                extract_pattern=extract_pattern,
-                system_prompt=system_prompt,
-                has_images=images is not None,
-                json_schema=json_schema,
-            )
+        # 'message' is fingerprinted on its own rather than as full_message,
+        # so that append_text can be left out below without its old value
+        # leaking into the hash via the merged string.
+        fingerprint_fields = dict(
+            settings,
+            message=message,
+            session_id=sid,
+            max_history_turns=max_history_turns,
+            extract_pattern=extract_pattern,
+            system_prompt=system_prompt,
+            has_images=images is not None,
+            json_schema=json_schema,
         )
+        if resend_on_append_text_change:
+            fingerprint_fields["append_text"] = extra_text
+        fingerprint = self._fingerprint(fingerprint_fields)
 
         # force_resend and reset_session are explicit "do it anyway" switches,
         # so they bypass the gate rather than feeding it.

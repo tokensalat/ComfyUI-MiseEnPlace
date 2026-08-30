@@ -1,0 +1,38 @@
+{
+  "1": {
+    "class_type": "BufferRead",
+    "inputs": {"handle": "feedback_demo", "reset": false},
+    "_meta": {"title": "Buffer Read"}
+  },
+  "2": {
+    "class_type": "PrimitiveString",
+    "inputs": {"value": "New note added this run."},
+    "_meta": {"title": "This run's note"}
+  },
+  "3": {
+    "class_type": "TextConcat",
+    "inputs": {
+      "parts.text0": ["1", 0],
+      "parts.text1": ["2", 0],
+      "separator": "\\n"
+    },
+    "_meta": {"title": "Append note to history"}
+  },
+  "4": {
+    "class_type": "BufferWrite",
+    "inputs": {"handle": "feedback_demo", "value": ["3", 0]},
+    "_meta": {"title": "Buffer Write"}
+  },
+  "5": {
+    "class_type": "MarkdownViewer",
+    "inputs": {
+      "markdown": ["4", 0],
+      "heading": "Feedback Loop",
+      "history_id": "feedback_demo_view",
+      "max_entries": 50,
+      "append": true,
+      "clear_first": false
+    },
+    "_meta": {"title": "Accumulated history"}
+  }
+}
