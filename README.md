@@ -1,5 +1,10 @@
 # ComfyUI-MiseEnPlace
 
+> Dieses Repository enthält Knoten. Weitere Angaben entnehmen Sie bitte den
+> Knoten.
+>
+> — frei nach Loriot
+
 A personal collection of custom nodes for ComfyUI, organized by category and
 auto-discovered from `nodes/`. Each node registers itself; adding a new one is
 just dropping a file into the right subfolder.
