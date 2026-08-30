@@ -308,8 +308,8 @@ class PromptBuilder(io.ComfyNode):
                 io.Boolean.Input(
                     "strict",
                     optional=True,
-                    default=False,
-                    tooltip="Off: a malformed document is logged and the standing prompt is passed through unchanged. On: it fails the run instead.",
+                    default=True,
+                    tooltip="On: a malformed document, or an operation that doesn't hold up against the standing prompt (e.g. 'modify' on a section that isn't there), fails the run rather than silently passing the old prompt through. Off: it's logged instead and the standing prompt continues unchanged.",
                 ),
             ],
             outputs=[
@@ -345,8 +345,23 @@ class PromptBuilder(io.ComfyNode):
         prompt_id="",
         max_history=50,
         reset=False,
-        strict=False,
+        strict=True,
     ) -> io.NodeOutput:
+        # A saved node whose widgets_values drifted out of sync with this
+        # schema (e.g. a field removed upstream shifts every later value one
+        # slot) lands a stray value here as an int or string rather than a
+        # bool - and a truthy int silently wiping the standing prompt via
+        # `reset` is exactly the failure this guard exists to catch loudly,
+        # instead of it passing as "reset happened to be on".
+        for field_name, value in (("reset", reset), ("strict", strict)):
+            if not isinstance(value, bool):
+                raise TypeError(
+                    f"Prompt Builder: '{field_name}' expected a boolean, got "
+                    f"{type(value).__name__} ({value!r}) - this usually means the node's "
+                    "saved widget values are out of sync with its current inputs; try "
+                    "deleting and re-adding the node (or right-click it and Fix node)."
+                )
+
         pid = _resolve_prompt_id(prompt_id, cls.hidden.unique_id)
         schema = schema_json()
 
