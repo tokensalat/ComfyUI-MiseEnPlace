@@ -10,7 +10,7 @@ directly as a node module.
 from comfy_api.latest import io
 
 # Custom socket type so bundles can only be wired into bundle-aware nodes.
-Bundle = io.Custom("ZERODRIFT_BUNDLE")
+Bundle = io.Custom("MISEENPLACE_BUNDLE")
 
 
 def parse_keys(keys: str) -> list:
