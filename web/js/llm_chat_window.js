@@ -353,6 +353,18 @@ function applyDelta(node, detail) {
     }
 }
 
+// 'reset_session' is a one-shot action, not a sticky mode: leaving it on
+// would wipe the session again on every later run, which is never what
+// ticking it once meant. The reset already took effect inside run() by the
+// time onExecuted fires, so flipping the checkbox back here just keeps the
+// widget honest about what the *next* run will do.
+function clearResetSwitch(node) {
+    const widget = node.widgets?.find((w) => w.name === "reset_session");
+    if (!widget || !widget.value) return;
+    widget.value = false;
+    node.graph?.setDirtyCanvas(true, true);
+}
+
 function findChatNode(nodeId, sessionId) {
     for (const node of app.graph?.nodes ?? app.graph?._nodes ?? []) {
         if (node.type !== CHAT_NODE_NAME) continue;
@@ -717,6 +729,7 @@ app.registerExtension({
         nodeType.prototype.onExecuted = function (message) {
             onExecuted?.apply(this, arguments);
             applyPayload(this, message?.history?.[0]);
+            clearResetSwitch(this);
         };
     },
     // Per-instance widget setup belongs here, not in an `onNodeCreated`
