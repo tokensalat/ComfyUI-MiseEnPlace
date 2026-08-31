@@ -11,8 +11,8 @@ from PIL import Image
 
 from comfy_execution.graph_utils import ExecutionBlocker
 
+from ..bundling._bundle_type import Bundle
 from ._llm_config import CONFIG_INPUT, field, merge_settings
-from ._llm_schema import json_schema_input, parse_json_schema
 from ._llm_text import extract_from_reply, extract_pattern_input
 
 # session_id -> list of OpenAI-style chat messages ({"role": ..., "content": ...}).
@@ -22,7 +22,7 @@ _SESSIONS_LOCK = threading.Lock()
 _SESSIONS = {}
 
 # session_id -> record of the last turn that actually reached the server:
-#   fingerprint  - backs the "don't re-generate just because the image
+#   fingerprint  - backs the "don't re-generate just because an attachment
 #                  changed" gate below; see _fingerprint()
 #   result       - the outputs to reuse when that gate trips
 #   settings     - the resolved url/sampling settings, so /compact can talk to
@@ -319,28 +319,26 @@ class LlamaCppChatSession:
                 "force_resend": ("BOOLEAN", {"default": False}),
             },
             "optional": {
-                "images": ("IMAGE",),
-                "system_prompt": ("STRING", {"default": "", "multiline": True}),
-                # Deliberately last: widgets_values is saved positionally and
-                # remapped positionally on load (migrateWidgetsValues only
-                # drops forceInput slots, it does not match by name), so a new
-                # widget anywhere but the end would shift every saved value
-                # after it - here, system_prompt's text into a boolean.
-                "resend_on_image_change": (
-                    "BOOLEAN",
+                # A link-only socket (like 'config' below), so it takes no
+                # widgets_values slot and cannot shift saved values. Connect a
+                # Bundler here to attach arbitrary extra content to the user
+                # turn: image-shaped items become image attachments the same
+                # way the old dedicated 'images' input did, and everything
+                # else is stringified into its own labelled text note - see
+                # _attachment_blocks().
+                "attachments": (
+                    Bundle.io_type,
                     {
-                        "default": False,
-                        "tooltip": "Off: a new turn is only generated when a prompt or setting changes - swapping the connected image on its own reuses the last reply. On: a change to the images generates too (for vision workflows that iterate over images with a fixed prompt).",
+                        "tooltip": "Optional. Connect a Bundler's output to attach arbitrary extra content to the user turn - image-shaped items are sent as image attachments, everything else is stringified into a note labelled with its bundle key.",
                     },
                 ),
-                # A link-only socket, so unlike the boolean above it takes no
-                # widgets_values slot at all and cannot shift saved values.
+                "system_prompt": ("STRING", {"default": "", "multiline": True}),
                 "config": CONFIG_INPUT,
                 "when_unchanged": (
                     UNCHANGED_CHOICES,
                     {
                         "default": UNCHANGED_BLOCK,
-                        "tooltip": "What happens on a run where nothing but the images changed. 'block downstream' emits nothing, so the rest of the graph does not run. 'reuse last reply' emits the previous reply and lets the chain continue.",
+                        "tooltip": "What happens on a run where nothing but the attachments changed. 'block downstream' emits nothing, so the rest of the graph does not run. 'reuse last reply' emits the previous reply and lets the chain continue.",
                     },
                 ),
                 "stream": (
@@ -359,29 +357,16 @@ class LlamaCppChatSession:
                         "tooltip": "How many recent exchanges the Compact button keeps verbatim. Everything older is replaced by one summary the model writes.",
                     },
                 ),
-                # New, so it goes after compact_keep_turns - the current last
-                # widget - to keep every existing saved widgets_values index
-                # pointing at what it always did.
-                "json_schema": json_schema_input(),
-                # Newer still, so it goes after json_schema for the same
-                # reason. Lets text be attached to the user turn without
-                # overwriting the 'message' widget - the same relationship
-                # 'images' has to it.
-                "append_text": (
-                    "STRING",
-                    {
-                        "default": "",
-                        "multiline": True,
-                        "tooltip": "Appended to 'message' before sending (after a blank line, if both are non-empty). Wire in text from elsewhere without overwriting the message widget - the same way 'images' attaches images without touching it.",
-                    },
-                ),
-                # Newest, so it goes after append_text for the same
-                # positional-saving reason noted on resend_on_image_change.
-                "resend_on_append_text_change": (
+                # Deliberately last: widgets_values is saved positionally and
+                # remapped positionally on load (migrateWidgetsValues only
+                # drops forceInput slots, it does not match by name), so a new
+                # widget anywhere but the end would shift every saved value
+                # after it.
+                "resend_on_attachment_change": (
                     "BOOLEAN",
                     {
-                        "default": True,
-                        "tooltip": "Off: a new turn is only generated when 'message' or a setting changes - updating 'append_text' on its own (e.g. from a live data source feeding it) reuses the last reply. On: a change to 'append_text' alone also generates a new turn.",
+                        "default": False,
+                        "tooltip": "Off: a new turn is only generated when a prompt or setting changes - swapping what's connected to 'attachments' on its own reuses the last reply. On: a change to the attachments generates too (for workflows that iterate over images or other attached values with a fixed prompt).",
                     },
                 ),
             },
@@ -442,18 +427,56 @@ class LlamaCppChatSession:
         return blocks
 
     @staticmethod
+    def _looks_like_image(value):
+        """Whether an arbitrary bundle value is an IMAGE-shaped tensor.
+
+        Bundler carries values through untyped, so an attachment could be
+        anything; only something that actually reshapes into (frames, h, w,
+        channels) should be sent as an image_url block instead of text.
+        """
+        try:
+            arr = value if isinstance(value, np.ndarray) else value.cpu().numpy()
+        except Exception:
+            return False
+        return isinstance(arr, np.ndarray) and arr.ndim in (3, 4)
+
+    @classmethod
+    def _attachment_blocks(cls, attachments):
+        """Bundle items -> extra content blocks for the user turn.
+
+        Each item becomes its own block, in the bundle's key order: an
+        image-shaped value becomes image_url block(s) the same way the old
+        dedicated 'images' input did, and anything else is stringified into
+        its own text block labelled with its bundle key, so several
+        attachments stay distinguishable in the transcript instead of being
+        silently concatenated together.
+        """
+        blocks = []
+        if not attachments:
+            return blocks
+        for key, value in attachments.items():
+            if value is None:
+                continue
+            if cls._looks_like_image(value):
+                blocks.extend(cls._images_to_content_blocks(value))
+            else:
+                blocks.append({"type": "text", "text": f"{key}: {value}"})
+        return blocks
+
+    @staticmethod
     def _fingerprint(inputs):
         """Hash of everything that should justify a new generation.
 
         ComfyUI's own cache can't express "ignore this one input": a node's
         signature folds in the full signature of every ancestor
         (CacheKeySetInputSignature.get_node_signature), and IS_CHANGED only
-        ever adds to that - so re-touching an upstream image node always
-        re-runs this node. The gate therefore lives here instead: the node
-        executes, compares this fingerprint against the last turn it actually
-        sent, and reuses that reply if nothing but the images moved.
+        ever adds to that - so re-touching an upstream node feeding
+        'attachments' always re-runs this node. The gate therefore lives here
+        instead: the node executes, compares this fingerprint against the
+        last turn it actually sent, and reuses that reply if nothing but the
+        attachments moved.
         """
-        payload = {k: v for k, v in inputs.items() if k != "images"}
+        payload = {k: v for k, v in inputs.items() if k != "attachments"}
         blob = json.dumps(payload, sort_keys=True, default=repr)
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
@@ -500,27 +523,16 @@ class LlamaCppChatSession:
         do_image_splitting,
         seed,
         force_resend,
-        images=None,
+        attachments=None,
         system_prompt="",
-        resend_on_image_change=False,
         config=None,
         when_unchanged=UNCHANGED_BLOCK,
         stream=True,
         compact_keep_turns=2,  # read by the Compact button, not by run()
-        json_schema="",
-        append_text="",
-        resend_on_append_text_change=True,
+        resend_on_attachment_change=False,
         unique_id=None,
     ):
         sid = self._resolve_session_id(session_id, unique_id)
-
-        # Folded in once, here, so every later use of "the user's text" - the
-        # history and the outgoing payload - already reflects it rather than
-        # each having to remember to combine the two. The fingerprint below
-        # uses 'message' and 'extra_text' separately instead, so that
-        # resend_on_append_text_change can drop the latter from the hash.
-        extra_text = (append_text or "").strip()
-        full_message = f"{message}\n\n{extra_text}" if (message and extra_text) else (message or extra_text)
 
         # A connected Llama-cpp Config overrides the widgets it covers; with
         # nothing connected this is just the local values. Prompts are never
@@ -548,9 +560,10 @@ class LlamaCppChatSession:
 
         # Fingerprinted from the *resolved* settings, so turning a knob on the
         # shared config node counts as a change here too - see _fingerprint().
-        # 'message' is fingerprinted on its own rather than as full_message,
-        # so that append_text can be left out below without its old value
-        # leaking into the hash via the merged string.
+        # Only whether something is attached is hashed, never its content:
+        # the bundle can carry arbitrary (and arbitrarily large) values, so
+        # dumping it would be slow and, for non-JSON-able values, would fall
+        # back to a repr() that can silently miss real changes anyway.
         fingerprint_fields = dict(
             settings,
             message=message,
@@ -558,16 +571,13 @@ class LlamaCppChatSession:
             max_history_turns=max_history_turns,
             extract_pattern=extract_pattern,
             system_prompt=system_prompt,
-            has_images=images is not None,
-            json_schema=json_schema,
+            has_attachments=attachments is not None,
         )
-        if resend_on_append_text_change:
-            fingerprint_fields["append_text"] = extra_text
         fingerprint = self._fingerprint(fingerprint_fields)
 
         # force_resend and reset_session are explicit "do it anyway" switches,
         # so they bypass the gate rather than feeding it.
-        if not (force_resend or reset_session or resend_on_image_change):
+        if not (force_resend or reset_session or resend_on_attachment_change):
             with _LAST_TURN_LOCK:
                 last = _LAST_TURN.get(sid)
             # .get, not [...]: compaction clears the fingerprint while leaving
@@ -576,18 +586,18 @@ class LlamaCppChatSession:
                 if when_unchanged == UNCHANGED_BLOCK:
                     # Returning the previous reply would still set the whole
                     # downstream chain running, because ComfyUI caches on input
-                    # signature rather than output value - an upstream image
-                    # swap re-runs every consumer regardless of the text being
-                    # identical. An ExecutionBlocker is the only thing that
-                    # actually stops that propagation.
+                    # signature rather than output value - an upstream
+                    # attachment swap re-runs every consumer regardless of the
+                    # text being identical. An ExecutionBlocker is the only
+                    # thing that actually stops that propagation.
                     print(
-                        f"[LlamaCppChatSession:{sid}] inputs unchanged apart from the images; "
+                        f"[LlamaCppChatSession:{sid}] inputs unchanged apart from the attachments; "
                         "blocking downstream execution"
                     )
                     blocked = tuple(ExecutionBlocker(None) for _ in self.RETURN_TYPES)
                     return {"ui": self._ui_payload(sid), "result": blocked}
                 print(
-                    f"[LlamaCppChatSession:{sid}] inputs unchanged apart from the images; "
+                    f"[LlamaCppChatSession:{sid}] inputs unchanged apart from the attachments; "
                     "reusing the last reply instead of generating"
                 )
                 return {"ui": self._ui_payload(sid), "result": last["result"]}
@@ -608,14 +618,14 @@ class LlamaCppChatSession:
                 else:
                     history.insert(0, {"role": "system", "content": system_prompt})
 
-            content_blocks = self._images_to_content_blocks(images)
+            content_blocks = self._attachment_blocks(attachments)
             if content_blocks:
                 user_message = {
                     "role": "user",
-                    "content": [{"type": "text", "text": full_message}] + content_blocks,
+                    "content": [{"type": "text", "text": message}] + content_blocks,
                 }
             else:
-                user_message = {"role": "user", "content": full_message}
+                user_message = {"role": "user", "content": message}
             history.append(user_message)
 
             payload_messages = list(history)
@@ -635,14 +645,6 @@ class LlamaCppChatSession:
         }
         if seed != -1:
             payload["seed"] = seed
-
-        # Constrain the reply to a schema, if one is connected. The server
-        # does the schema -> grammar conversion; see _llm_schema.py. Set once
-        # on the shared payload, so it reaches both the streaming and the
-        # non-streaming branch below.
-        format_block = parse_json_schema(json_schema, f"[LlamaCppChatSession:{sid}] ")
-        if format_block:
-            payload["response_format"] = format_block
 
         def rollback_user_turn():
             with _SESSIONS_LOCK:
