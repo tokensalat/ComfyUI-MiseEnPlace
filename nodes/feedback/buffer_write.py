@@ -17,6 +17,15 @@ class BufferWrite(io.ComfyNode):
                 "run. Passes 'value' through unchanged so this node can sit inline rather than at "
                 "a dead end."
             ),
+            # The write is a side effect performed in execute(), not something
+            # expressed through the passthrough output - so if that output
+            # doesn't happen to lead to a real output node (SaveImage,
+            # PreviewImage, MarkdownViewer, ...), ComfyUI prunes this node out
+            # of the run entirely and the store never happens, no matter what
+            # is wired into 'value'. is_output_node=True is what SaveImage
+            # etc. use to always be part of the execution list; this needs
+            # the same guarantee for the same reason.
+            is_output_node=True,
             inputs=[
                 io.String.Input(
                     "handle",
@@ -32,6 +41,14 @@ class BufferWrite(io.ComfyNode):
                 io.AnyType.Output(display_name="value"),
             ],
         )
+
+    @classmethod
+    def fingerprint_inputs(cls, **kwargs):
+        # Storing `value` is a side effect, not a pure function of the
+        # inputs - if ComfyUI decides this node "looks like" a previous run
+        # and skips execute(), the buffer just stops updating. Forcing a
+        # cache miss on every run guarantees the write actually happens.
+        return float("nan")
 
     @classmethod
     def execute(cls, handle, value) -> io.NodeOutput:
