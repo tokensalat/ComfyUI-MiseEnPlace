@@ -21,6 +21,9 @@ git clone <this-repo-url> ComfyUI-MiseEnPlace
 Restart ComfyUI. Nodes appear under the `MiseEnPlace/*` categories in the Add
 Node menu.
 
+See [examples/](examples/) for a few small, self-contained workflows that
+wire several nodes together.
+
 Most nodes only need what ComfyUI already ships with (`torch`, `numpy`,
 `Pillow`, `requests`). A few have narrower extras:
 
@@ -86,9 +89,10 @@ Nodes for talking to a llama.cpp-compatible server.
   into the other two nodes so they share one set of knobs instead of each
   keeping its own copy.
 - **Llama-cpp Chat Session** - a persistent, multi-turn chat session (keyed by
-  a session id) with a live chat window, token streaming, image attachments,
-  history trimming, and a Compact button that summarizes older turns via the
-  same server instead of just truncating them.
+  a session id) with a live chat window, token streaming, arbitrary bundled
+  attachments (images and other values from a Bundler), history trimming, and
+  a Compact button that summarizes older turns via the same server instead of
+  just truncating them.
 
 ### LoRA
 
