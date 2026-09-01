@@ -357,16 +357,23 @@ class LlamaCppChatSession:
                         "tooltip": "How many recent exchanges the Compact button keeps verbatim. Everything older is replaced by one summary the model writes.",
                     },
                 ),
-                # Deliberately last: widgets_values is saved positionally and
-                # remapped positionally on load (migrateWidgetsValues only
-                # drops forceInput slots, it does not match by name), so a new
-                # widget anywhere but the end would shift every saved value
-                # after it.
                 "resend_on_attachment_change": (
                     "BOOLEAN",
                     {
                         "default": False,
                         "tooltip": "Off: a new turn is only generated when a prompt or setting changes - swapping what's connected to 'attachments' on its own reuses the last reply. On: a change to the attachments generates too (for workflows that iterate over images or other attached values with a fixed prompt).",
+                    },
+                ),
+                # Deliberately last: widgets_values is saved positionally and
+                # remapped positionally on load (migrateWidgetsValues only
+                # drops forceInput slots, it does not match by name), so a new
+                # widget anywhere but the end would shift every saved value
+                # after it.
+                "require_extraction": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "On: a turn whose reply does not match extract_pattern blocks the 'extracted' output instead of emitting empty text - so you can chat back and forth without triggering whatever 'extracted' feeds, and only a reply that actually contains the pattern lets it through. full_text, session_id and debug are unaffected. Off (default): emits an empty string as before.",
                     },
                 ),
             },
@@ -481,6 +488,25 @@ class LlamaCppChatSession:
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
     @staticmethod
+    def _gate_extraction(result, require_extraction):
+        """Block the 'extracted' socket instead of passing through no-match text.
+
+        Only meaningful when require_extraction is on: a plain chat turn -
+        one whose reply never matches extract_pattern - then blocks whatever
+        'extracted' feeds instead of handing it an empty string, so the rest
+        of the graph only runs once a reply actually contains the pattern.
+        full_text/session_id/debug are untouched either way, so the chat
+        window and anything reading the session id keep working normally
+        through a back-and-forth conversation.
+        """
+        if not require_extraction:
+            return result
+        full_text, extracted, sid, debug = result
+        if extracted:
+            return result
+        return (full_text, ExecutionBlocker(None), sid, debug)
+
+    @staticmethod
     def _ui_payload(sid):
         with _SESSIONS_LOCK:
             history = list(_SESSIONS.get(sid, []))
@@ -530,6 +556,7 @@ class LlamaCppChatSession:
         stream=True,
         compact_keep_turns=2,  # read by the Compact button, not by run()
         resend_on_attachment_change=False,
+        require_extraction=False,
         unique_id=None,
     ):
         sid = self._resolve_session_id(session_id, unique_id)
@@ -600,7 +627,8 @@ class LlamaCppChatSession:
                     f"[LlamaCppChatSession:{sid}] inputs unchanged apart from the attachments; "
                     "reusing the last reply instead of generating"
                 )
-                return {"ui": self._ui_payload(sid), "result": last["result"]}
+                result = self._gate_extraction(last["result"], require_extraction)
+                return {"ui": self._ui_payload(sid), "result": result}
 
         if reset_session:
             with _LAST_TURN_LOCK:
@@ -695,7 +723,8 @@ class LlamaCppChatSession:
                     error_msg = f"Server returned error status {response.status_code}: {response.text}"
                     print(error_msg)
                     rollback_user_turn()
-                    return {"ui": self._ui_payload(sid), "result": (error_msg, "", sid, error_msg)}
+                    result = self._gate_extraction((error_msg, "", sid, error_msg), require_extraction)
+                    return {"ui": self._ui_payload(sid), "result": result}
 
                 result = response.json()
                 debug_output = json.dumps(result, indent=2)
@@ -745,23 +774,27 @@ class LlamaCppChatSession:
                     "usage": usage if isinstance(usage, dict) else None,
                     "chars": history_chars(payload_messages),
                 }
-            return {"ui": self._ui_payload(sid), "result": turn_result}
+            result = self._gate_extraction(turn_result, require_extraction)
+            return {"ui": self._ui_payload(sid), "result": result}
 
         except requests.exceptions.RequestException as e:
             error_msg = f"HTTP request failed: {str(e)}"
             print(error_msg)
             rollback_user_turn()
-            return {"ui": self._ui_payload(sid), "result": (error_msg, "", sid, error_msg)}
+            result = self._gate_extraction((error_msg, "", sid, error_msg), require_extraction)
+            return {"ui": self._ui_payload(sid), "result": result}
         except json.JSONDecodeError as e:
             error_msg = f"Failed to parse JSON response: {str(e)}"
             print(error_msg)
             rollback_user_turn()
-            return {"ui": self._ui_payload(sid), "result": (error_msg, "", sid, error_msg)}
+            result = self._gate_extraction((error_msg, "", sid, error_msg), require_extraction)
+            return {"ui": self._ui_payload(sid), "result": result}
         except Exception as e:
             error_msg = f"Error communicating with llama-cpp server: {str(e)}"
             print(error_msg)
             rollback_user_turn()
-            return {"ui": self._ui_payload(sid), "result": (error_msg, "", sid, error_msg)}
+            result = self._gate_extraction((error_msg, "", sid, error_msg), require_extraction)
+            return {"ui": self._ui_payload(sid), "result": result}
 
 
 COMPACT_SYSTEM_PROMPT = (
