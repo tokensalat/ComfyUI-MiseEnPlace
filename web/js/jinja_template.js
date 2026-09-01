@@ -66,7 +66,11 @@ function applyVariables(node, names) {
     }
 
     if (changed) {
-        node.size[1] = node.computeSize()[1];
+        // Grow only, never shrink: computeSize() is the node's natural
+        // minimum height, and assigning it unconditionally snapped away any
+        // manual resize the moment a placeholder was added or removed.
+        const minHeight = node.computeSize()[1];
+        if (node.size[1] < minHeight) node.size[1] = minHeight;
         node.graph?.setDirtyCanvas(true, true);
     }
     return changed;
