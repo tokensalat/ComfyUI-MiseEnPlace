@@ -202,14 +202,18 @@ def _snapshot(pid):
         return _snapshot_locked(pid, _STATE.get(pid))
 
 
-def _record(state, sections, changes, note, max_history):
+def _record(state, sections, changes, note, max_history, num_edits=0):
     """Append a version and return it.
 
     History is append-only: restoring an old version adds a new one rather than
     truncating, so nothing you have seen on the node can disappear from under
     you. That costs a little memory and buys a prompt you can always walk back.
     """
+    # Read before state["sections"] is overwritten below, so this is the
+    # length of the prompt as it stood immediately before this version.
+    previous_length = len(render(state["sections"]))
     state["revision"] += 1
+    text = render(sections)
     version = {
         "index": state["revision"],
         "time": time.time(),
@@ -218,7 +222,10 @@ def _record(state, sections, changes, note, max_history):
         "modified": changes.get("modified", []),
         "removed": changes.get("removed", []),
         "sections": [dict(s) for s in sections],
-        "text": render(sections),
+        "text": text,
+        "num_edits": num_edits,
+        "length": len(text),
+        "previous_length": previous_length,
     }
     state["sections"] = [dict(s) for s in sections]
     state["history"].append(version)
@@ -389,18 +396,22 @@ class PromptBuilder(io.ComfyNode):
                 _STATE[pid] = state = _new_state()
             if operations:
                 note = "update after reset" if reset else "update"
-                version = _record(state, sections, changes, note, max_history)
+                version = _record(state, sections, changes, note, max_history, len(operations))
             else:
                 # Nothing usable came in. Re-render what is already there rather
                 # than emitting an empty prompt: downstream nodes are better
                 # served by the last good prompt than by nothing at all.
                 state["sections"] = sections
+                text = render(sections)
                 version = {
                     "index": state["revision"],
-                    "text": render(sections),
+                    "text": text,
                     "added": [],
                     "modified": [],
                     "removed": [],
+                    "num_edits": 0,
+                    "length": len(text),
+                    "previous_length": len(text),
                 }
             snapshot = _snapshot_locked(pid, state)
 
