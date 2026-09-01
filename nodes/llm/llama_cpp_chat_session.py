@@ -364,16 +364,23 @@ class LlamaCppChatSession:
                         "tooltip": "Off: a new turn is only generated when a prompt or setting changes - swapping what's connected to 'attachments' on its own reuses the last reply. On: a change to the attachments generates too (for workflows that iterate over images or other attached values with a fixed prompt).",
                     },
                 ),
-                # Deliberately last: widgets_values is saved positionally and
-                # remapped positionally on load (migrateWidgetsValues only
-                # drops forceInput slots, it does not match by name), so a new
-                # widget anywhere but the end would shift every saved value
-                # after it.
                 "require_extraction": (
                     "BOOLEAN",
                     {
                         "default": False,
                         "tooltip": "On: a turn whose reply does not match extract_pattern blocks the 'extracted' output instead of emitting empty text - so you can chat back and forth without triggering whatever 'extracted' feeds, and only a reply that actually contains the pattern lets it through. full_text, session_id and debug are unaffected. Off (default): emits an empty string as before.",
+                    },
+                ),
+                # Deliberately last: widgets_values is saved positionally and
+                # remapped positionally on load (migrateWidgetsValues only
+                # drops forceInput slots, it does not match by name), so a new
+                # widget anywhere but the end would shift every saved value
+                # after it.
+                "keep_history": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "On (default): the standing conversation is kept and replayed on every turn, like a normal chat session. Off: nothing is read from or written to it - every turn sends only the system prompt (if any) and this message, with no memory of earlier turns, and this turn isn't saved for later ones either.",
                     },
                 ),
             },
@@ -507,9 +514,37 @@ class LlamaCppChatSession:
         return (full_text, ExecutionBlocker(None), sid, debug)
 
     @staticmethod
-    def _ui_payload(sid):
-        with _SESSIONS_LOCK:
-            history = list(_SESSIONS.get(sid, []))
+    def _apply_turn(history, system_prompt, message, content_blocks):
+        """Append this turn's user message onto `history` in place; returns it.
+
+        Shared by the persistent-session path (history is _SESSIONS[sid]) and
+        the keep_history=False path (history is a throwaway list), so a
+        stateless turn is built exactly the same way a remembered one is.
+        """
+        system_prompt = (system_prompt or "").strip()
+        if system_prompt:
+            if history and history[0].get("role") == "system":
+                history[0]["content"] = system_prompt
+            else:
+                history.insert(0, {"role": "system", "content": system_prompt})
+        if content_blocks:
+            user_message = {
+                "role": "user",
+                "content": [{"type": "text", "text": message}] + content_blocks,
+            }
+        else:
+            user_message = {"role": "user", "content": message}
+        history.append(user_message)
+        return user_message
+
+    @staticmethod
+    def _ui_payload(sid, history=None):
+        # A caller passes `history` directly when there is nothing in
+        # _SESSIONS to read back - keep_history=False never writes there, so
+        # the turn just built is the only record of it that exists.
+        if history is None:
+            with _SESSIONS_LOCK:
+                history = list(_SESSIONS.get(sid, []))
         return {
             "history": [
                 json.dumps(
@@ -557,6 +592,7 @@ class LlamaCppChatSession:
         compact_keep_turns=2,  # read by the Compact button, not by run()
         resend_on_attachment_change=False,
         require_extraction=False,
+        keep_history=True,
         unique_id=None,
     ):
         sid = self._resolve_session_id(session_id, unique_id)
@@ -599,6 +635,7 @@ class LlamaCppChatSession:
             extract_pattern=extract_pattern,
             system_prompt=system_prompt,
             has_attachments=attachments is not None,
+            keep_history=keep_history,
         )
         fingerprint = self._fingerprint(fingerprint_fields)
 
@@ -634,27 +671,19 @@ class LlamaCppChatSession:
             with _LAST_TURN_LOCK:
                 _LAST_TURN.pop(sid, None)
 
+        content_blocks = self._attachment_blocks(attachments)
+
         with _SESSIONS_LOCK:
             if reset_session:
                 _SESSIONS.pop(sid, None)
-            history = _SESSIONS.setdefault(sid, [])
-
-            system_prompt = (system_prompt or "").strip()
-            if system_prompt:
-                if history and history[0].get("role") == "system":
-                    history[0]["content"] = system_prompt
-                else:
-                    history.insert(0, {"role": "system", "content": system_prompt})
-
-            content_blocks = self._attachment_blocks(attachments)
-            if content_blocks:
-                user_message = {
-                    "role": "user",
-                    "content": [{"type": "text", "text": message}] + content_blocks,
-                }
+            if keep_history:
+                history = _SESSIONS.setdefault(sid, [])
             else:
-                user_message = {"role": "user", "content": message}
-            history.append(user_message)
+                # Stateless: never read from or written to _SESSIONS, so this
+                # turn starts from just the system prompt and nothing about
+                # it lingers for the next one either.
+                history = []
+            user_message = self._apply_turn(history, system_prompt, message, content_blocks)
 
             # 'reasoning' is this node's own bookkeeping for the collapsible
             # thinking block in the chat window - stripped here so a
@@ -679,10 +708,17 @@ class LlamaCppChatSession:
             payload["seed"] = seed
 
         def rollback_user_turn():
+            # Nothing to undo when keep_history is off - `history` was never
+            # anything but a local list, never written into _SESSIONS.
+            if not keep_history:
+                return
             with _SESSIONS_LOCK:
                 current = _SESSIONS.get(sid)
                 if current and current[-1] is user_message:
                     current.pop()
+
+        def ui_payload():
+            return self._ui_payload(sid, None if keep_history else history)
 
         try:
             headers = {"Content-Type": "application/json"}
@@ -724,7 +760,7 @@ class LlamaCppChatSession:
                     print(error_msg)
                     rollback_user_turn()
                     result = self._gate_extraction((error_msg, "", sid, error_msg), require_extraction)
-                    return {"ui": self._ui_payload(sid), "result": result}
+                    return {"ui": ui_payload(), "result": result}
 
                 result = response.json()
                 debug_output = json.dumps(result, indent=2)
@@ -750,10 +786,16 @@ class LlamaCppChatSession:
             assistant_message = {"role": "assistant", "content": generated_text}
             if reasoning:
                 assistant_message["reasoning"] = reasoning
-            with _SESSIONS_LOCK:
-                current = _SESSIONS.setdefault(sid, [])
-                current.append(assistant_message)
-                _SESSIONS[sid] = self._trim_history(current, max_history_turns)
+            if keep_history:
+                with _SESSIONS_LOCK:
+                    current = _SESSIONS.setdefault(sid, [])
+                    current.append(assistant_message)
+                    _SESSIONS[sid] = self._trim_history(current, max_history_turns)
+            else:
+                # Completes the throwaway transcript so this turn still
+                # renders as a normal exchange in the chat window, even
+                # though nothing of it is kept past this return.
+                history.append(assistant_message)
 
             extracted = extract_from_reply(
                 generated_text, extract_pattern, f"[LlamaCppChatSession:{sid}] "
@@ -775,26 +817,26 @@ class LlamaCppChatSession:
                     "chars": history_chars(payload_messages),
                 }
             result = self._gate_extraction(turn_result, require_extraction)
-            return {"ui": self._ui_payload(sid), "result": result}
+            return {"ui": ui_payload(), "result": result}
 
         except requests.exceptions.RequestException as e:
             error_msg = f"HTTP request failed: {str(e)}"
             print(error_msg)
             rollback_user_turn()
             result = self._gate_extraction((error_msg, "", sid, error_msg), require_extraction)
-            return {"ui": self._ui_payload(sid), "result": result}
+            return {"ui": ui_payload(), "result": result}
         except json.JSONDecodeError as e:
             error_msg = f"Failed to parse JSON response: {str(e)}"
             print(error_msg)
             rollback_user_turn()
             result = self._gate_extraction((error_msg, "", sid, error_msg), require_extraction)
-            return {"ui": self._ui_payload(sid), "result": result}
+            return {"ui": ui_payload(), "result": result}
         except Exception as e:
             error_msg = f"Error communicating with llama-cpp server: {str(e)}"
             print(error_msg)
             rollback_user_turn()
             result = self._gate_extraction((error_msg, "", sid, error_msg), require_extraction)
-            return {"ui": self._ui_payload(sid), "result": result}
+            return {"ui": ui_payload(), "result": result}
 
 
 COMPACT_SYSTEM_PROMPT = (
