@@ -112,32 +112,102 @@ function renderMarkdown(text) {
     return working;
 }
 
+// A model's reasoning is shown live while it streams (see beginStreaming),
+// but once a turn is finalised and re-rendered from history it would
+// otherwise vanish - or, kept as-is, permanently take up as much room as the
+// reply itself. <details> persists it while defaulting to closed, with no JS
+// needed for the toggle.
+function renderReasoningBlock(reasoning) {
+    const details = document.createElement("details");
+    details.className = "miseenplace-chat-reasoning-block";
+    const summary = document.createElement("summary");
+    summary.textContent = "Thinking";
+    const body = document.createElement("div");
+    body.className = "miseenplace-chat-reasoning";
+    body.textContent = reasoning;
+    details.append(summary, body);
+    return details;
+}
+
+// One small chip per attachment, rather than inlining images at full size in
+// the bubble - a bundle can carry several, and a caption-sized transcript
+// entry shouldn't grow to the height of whatever was attached to it.
+function renderAttachmentChip(block) {
+    if (block?.type === "image_url") {
+        const link = document.createElement("a");
+        link.className = "miseenplace-chat-attachment miseenplace-chat-attachment-image";
+        link.href = block.image_url?.url || "#";
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.title = "Open attached image";
+        const img = document.createElement("img");
+        img.src = block.image_url?.url || "";
+        img.alt = "attachment";
+        link.appendChild(img);
+        return link;
+    }
+    // Non-image attachments arrive as "key: value" text blocks - see
+    // LlamaCppChatSession._attachment_blocks. Only the key fits on a chip;
+    // the value goes in the tooltip.
+    const raw = String(block?.text ?? "");
+    const sep = raw.indexOf(": ");
+    const label = sep > -1 ? raw.slice(0, sep) : raw || "attachment";
+    const value = sep > -1 ? raw.slice(sep + 2) : raw;
+    const chip = document.createElement("div");
+    chip.className = "miseenplace-chat-attachment miseenplace-chat-attachment-note";
+    chip.textContent = `📎 ${label}`;
+    chip.title = value;
+    return chip;
+}
+
+function renderAttachmentsRow(blocks, role) {
+    const row = document.createElement("div");
+    row.className = `miseenplace-chat-attachments role-${role}`;
+    for (const block of blocks) {
+        row.appendChild(renderAttachmentChip(block));
+    }
+    return row;
+}
+
+// Returns a turn wrapper containing the message bubble and, when the turn
+// carries any, an attachments strip rendered outside the bubble rather than
+// inline within it.
 function renderMessage(msg) {
     const role = msg?.role || "assistant";
-    const el = document.createElement("div");
-    el.className = `miseenplace-chat-msg role-${role}`;
+    const turn = document.createElement("div");
+    turn.className = `miseenplace-chat-turn role-${role}`;
+
+    const bubble = document.createElement("div");
+    bubble.className = `miseenplace-chat-msg role-${role}`;
+    turn.appendChild(bubble);
 
     if (role !== "system") {
         const roleLabel = document.createElement("div");
         roleLabel.className = "miseenplace-chat-role";
         roleLabel.textContent = role === "user" ? "You" : "Assistant";
-        el.appendChild(roleLabel);
+        bubble.appendChild(roleLabel);
     }
 
-    const blocks = Array.isArray(msg?.content) ? msg.content : [{ type: "text", text: msg?.content ?? "" }];
-    for (const block of blocks) {
-        if (block?.type === "image_url") {
-            const img = document.createElement("img");
-            img.src = block.image_url?.url || "";
-            el.appendChild(img);
-        } else {
-            const textEl = document.createElement("div");
-            textEl.className = "miseenplace-chat-text";
-            textEl.innerHTML = renderMarkdown(String(block?.text ?? ""));
-            el.appendChild(textEl);
-        }
+    if (msg?.reasoning) {
+        bubble.appendChild(renderReasoningBlock(msg.reasoning));
     }
-    return el;
+
+    // A user turn with attachments has content = [{type:"text", text: message}]
+    // followed by one block per attachment (see _attachment_blocks); every
+    // other role's content is always a plain string.
+    const isList = Array.isArray(msg?.content);
+    const mainText = isList ? msg.content[0]?.text ?? "" : msg?.content ?? "";
+    const attachmentBlocks = isList ? msg.content.slice(1) : [];
+
+    const textEl = document.createElement("div");
+    textEl.className = "miseenplace-chat-text";
+    textEl.innerHTML = renderMarkdown(String(mainText));
+    bubble.appendChild(textEl);
+
+    if (attachmentBlocks.length) {
+        turn.appendChild(renderAttachmentsRow(attachmentBlocks, role));
+    }
+    return turn;
 }
 
 function renderHistory(container, messages) {
@@ -163,13 +233,31 @@ function autosizeInput(textarea) {
 // state is spelled out in the role label rather than shown by fading the
 // bubble: a slow reply leaves this on screen for the whole generation, and at
 // the opacity that reads as "pending" the text drops to ~2.4:1.
-function appendPendingMessage(container, text) {
+//
+// Whatever is wired into 'attachments' is a Bundler output the frontend has
+// no way to read before the node actually runs, so its real contents (image
+// thumbnails, note labels) can only appear once onExecuted re-renders the
+// full history. A generic chip here just confirms something is attached, so
+// that confirmation doesn't have to wait for the whole generation either.
+function appendPendingMessage(node, container, text) {
     if (!container) return;
-    const el = renderMessage({ role: "user", content: text });
-    el.classList.add("pending");
-    const roleLabel = el.querySelector(".miseenplace-chat-role");
+    const turn = renderMessage({ role: "user", content: text });
+    turn.querySelector(".miseenplace-chat-msg")?.classList.add("pending");
+    const roleLabel = turn.querySelector(".miseenplace-chat-role");
     if (roleLabel) roleLabel.textContent = "You · sending…";
-    container.appendChild(el);
+
+    const attachmentsLink = node.inputs?.find((i) => i.name === "attachments")?.link;
+    if (attachmentsLink != null) {
+        const row = document.createElement("div");
+        row.className = "miseenplace-chat-attachments role-user";
+        const chip = document.createElement("div");
+        chip.className = "miseenplace-chat-attachment miseenplace-chat-attachment-note pending";
+        chip.textContent = "📎 attaching…";
+        row.appendChild(chip);
+        turn.appendChild(row);
+    }
+
+    container.appendChild(turn);
     container.scrollTop = container.scrollHeight;
 }
 
@@ -299,6 +387,8 @@ async function compactSession(node, button) {
 function beginStreaming(node) {
     const container = node._zdChatMessagesEl;
     if (!container) return null;
+    const turn = document.createElement("div");
+    turn.className = "miseenplace-chat-turn role-assistant";
     const el = document.createElement("div");
     el.className = "miseenplace-chat-msg role-assistant streaming";
     const role = document.createElement("div");
@@ -310,7 +400,8 @@ function beginStreaming(node) {
     const text = document.createElement("div");
     text.className = "miseenplace-chat-text";
     el.append(role, reasoning, text);
-    container.appendChild(el);
+    turn.appendChild(el);
+    container.appendChild(turn);
     container.scrollTop = container.scrollHeight;
     return { el, role, reasoning, text, content: "", thinking: "" };
 }
@@ -437,8 +528,18 @@ function ensureStyles() {
             background: var(--mep-border); border-radius: 5px;
             border: 3px solid transparent; background-clip: content-box;
         }
-        .miseenplace-chat-msg {
+        /* One turn = the bubble plus, when present, its attachments strip
+           rendered outside the bubble - this wrapper is what aligns both of
+           those to the speaker's side and stacks turns in the transcript. */
+        .miseenplace-chat-turn {
+            display: flex;
+            flex-direction: column;
             margin-bottom: 10px;
+        }
+        .miseenplace-chat-turn.role-user { align-items: flex-end; }
+        .miseenplace-chat-turn.role-assistant { align-items: flex-start; }
+        .miseenplace-chat-turn.role-system { align-items: center; margin-bottom: 12px; }
+        .miseenplace-chat-msg {
             padding: 7px 11px;
             border-radius: 12px;
             max-width: 88%;
@@ -450,16 +551,49 @@ function ensureStyles() {
            reads from the silhouette and not from colour alone. */
         .miseenplace-chat-msg.role-user {
             background: var(--mep-accent); color: var(--mep-on-accent);
-            margin-left: auto; border-bottom-right-radius: 4px;
+            border-bottom-right-radius: 4px;
         }
         .miseenplace-chat-msg.role-assistant {
             background: var(--mep-raised); color: var(--mep-text);
-            margin-right: auto; border-bottom-left-radius: 4px;
+            border-bottom-left-radius: 4px;
         }
         .miseenplace-chat-msg.role-system {
             background: transparent; color: var(--mep-text-muted); font-style: italic;
-            text-align: center; max-width: 100%; width: auto; margin-bottom: 12px;
+            text-align: center; max-width: 100%; width: auto;
         }
+        /* Sits below the bubble it belongs to, aligned to the same side by
+           the turn wrapper above rather than by anything of its own. */
+        .miseenplace-chat-attachments {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            max-width: 88%;
+            margin-top: 4px;
+        }
+        .miseenplace-chat-attachment {
+            display: block;
+            flex-shrink: 0;
+        }
+        .miseenplace-chat-attachment-image img {
+            width: 44px; height: 44px;
+            object-fit: cover;
+            border-radius: 6px;
+            border: 1px solid var(--mep-border-strong);
+            display: block;
+        }
+        .miseenplace-chat-attachment-note {
+            font-size: calc(var(--mep-chat-font) - 3px);
+            background: var(--mep-raised);
+            border: 1px solid var(--mep-border-strong);
+            border-radius: 6px;
+            padding: 4px 8px;
+            color: var(--mep-text-muted);
+            max-width: 140px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .miseenplace-chat-attachment-note.pending { font-style: italic; }
         /* A real colour, not opacity: 0.6 on 11px text washed the label out. */
         .miseenplace-chat-role {
             font-size: calc(var(--mep-chat-font) - 3px);
@@ -498,7 +632,6 @@ function ensureStyles() {
         }
         .miseenplace-chat-text a { color: inherit; text-decoration: underline; }
         .miseenplace-chat-msg.role-assistant .miseenplace-chat-text a { color: var(--mep-accent); }
-        .miseenplace-chat-msg img { max-width: 100%; max-height: 160px; display: block; margin-top: 4px; border-radius: 6px; }
         /* flex-end keeps the button on the bottom edge as the composer grows. */
         .miseenplace-chat-input-row {
             display: flex; gap: 6px; margin-top: 8px; align-items: flex-end; flex: 0 0 auto;
@@ -568,6 +701,19 @@ function ensureStyles() {
             padding-left: 8px;
             border-left: 2px solid var(--mep-border-strong);
         }
+        /* Persisted (as opposed to the live view built by beginStreaming
+           below) thinking is collapsed by default - it's the model's scratch
+           work, not the reply, and left open it can dwarf the actual answer. */
+        .miseenplace-chat-reasoning-block { margin-bottom: 6px; }
+        .miseenplace-chat-reasoning-block .miseenplace-chat-reasoning { margin-top: 4px; margin-bottom: 0; }
+        .miseenplace-chat-reasoning-block summary {
+            cursor: pointer;
+            font-size: calc(var(--mep-chat-font) - 3px);
+            color: var(--mep-text-muted);
+            user-select: none;
+        }
+        .miseenplace-chat-reasoning-block summary:hover { color: var(--mep-text); }
+        .miseenplace-chat-msg.role-user .miseenplace-chat-reasoning-block summary { color: var(--mep-on-accent); opacity: 0.8; }
         .miseenplace-chat-msg.role-assistant.streaming .miseenplace-chat-text::after {
             content: "▌";
             opacity: 0.6;
@@ -661,7 +807,7 @@ function buildChatWidget(node) {
         // next onExecuted re-renders the whole history from the server and
         // supersedes this bubble (including dropping it again if the request
         // failed and the node rolled the user turn back).
-        appendPendingMessage(messages, text);
+        appendPendingMessage(node, messages, text);
         app.queuePrompt(0);
     };
     sendBtn.addEventListener("click", send);

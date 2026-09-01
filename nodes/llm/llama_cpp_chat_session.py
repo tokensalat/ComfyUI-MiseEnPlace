@@ -628,7 +628,11 @@ class LlamaCppChatSession:
                 user_message = {"role": "user", "content": message}
             history.append(user_message)
 
-            payload_messages = list(history)
+            # 'reasoning' is this node's own bookkeeping for the collapsible
+            # thinking block in the chat window - stripped here so a
+            # reasoning model's already-finished thoughts are never replayed
+            # back into its own context on a later turn.
+            payload_messages = [{k: v for k, v in m.items() if k != "reasoning"} for m in history]
 
         payload = {
             "messages": payload_messages,
@@ -661,9 +665,9 @@ class LlamaCppChatSession:
             )
 
             usage = None
+            reasoning = ""
             if stream:
                 generated_text = ""
-                reasoning = ""
                 finish_reason = None
                 # No opening push: the window already shows the optimistic
                 # "sending…" bubble, and the live one appears on the first
@@ -702,6 +706,7 @@ class LlamaCppChatSession:
                     choice = result["choices"][0]
                     if "message" in choice and "content" in choice["message"]:
                         generated_text = choice["message"]["content"]
+                        reasoning = choice["message"].get("reasoning_content") or ""
                     elif "text" in choice:
                         generated_text = choice["text"]
                 elif "content" in result:
@@ -713,9 +718,12 @@ class LlamaCppChatSession:
                 else:
                     generated_text = debug_output
 
+            assistant_message = {"role": "assistant", "content": generated_text}
+            if reasoning:
+                assistant_message["reasoning"] = reasoning
             with _SESSIONS_LOCK:
                 current = _SESSIONS.setdefault(sid, [])
-                current.append({"role": "assistant", "content": generated_text})
+                current.append(assistant_message)
                 _SESSIONS[sid] = self._trim_history(current, max_history_turns)
 
             extracted = extract_from_reply(
