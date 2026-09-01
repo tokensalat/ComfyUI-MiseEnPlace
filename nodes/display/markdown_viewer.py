@@ -83,6 +83,21 @@ class MarkdownViewer:
         "accumulated 'document' output can be piped onward."
     )
 
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        # Appending to the history is a side effect, not a pure function of
+        # the inputs - with no override here, ComfyUI's own cache skips run()
+        # whenever the resolved inputs match a previous call (e.g. a static
+        # upstream value, or literally re-queueing the same graph) and just
+        # replays that previous call's cached "ui" payload instead. That is
+        # what made the Clear button look broken: clearing empties the
+        # server-side history, but the very next run - if nothing else
+        # changed - handed back the stale pre-clear entries from cache rather
+        # than actually calling run() again. Forcing a cache miss every time
+        # is what guarantees run() - and therefore the clear - actually
+        # takes effect. Same trick as Buffer Read/Write's fingerprint_inputs.
+        return float("nan")
+
     def run(
         self,
         markdown,
