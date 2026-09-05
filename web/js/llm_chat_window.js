@@ -223,9 +223,26 @@ function renderHistory(container, messages) {
 // do the clamping, so this only has to ask for the content height; adding
 // offsetHeight - clientHeight puts the border back, which scrollHeight omits
 // and box-sizing: border-box would otherwise eat.
+//
+// The actual resize is deferred to the next animation frame and coalesced:
+// forcing a layout (the "auto" write followed by reading scrollHeight) is
+// exactly the kind of synchronous work that must never sit in the "input"
+// handler's own call stack. On this node the resize also feeds ComfyUI's own
+// DOM-widget ResizeObserver, which recomputes the whole node's layout - doing
+// that inline, once per character, on top of a large graph is slow enough
+// that fast typing (or the OS's own key-repeat while a key is held a beat
+// too long) piles up and gets flushed all at once, which is what "repeated
+// keystrokes" (e.g. "helllllllllllllllo") actually is. Coalescing to one
+// pass per frame keeps every keystroke's own handler cheap so the browser
+// can keep up instead of falling behind and dumping a backlog.
 function autosizeInput(textarea) {
-    textarea.style.height = "auto";
-    textarea.style.height = `${textarea.scrollHeight + textarea.offsetHeight - textarea.clientHeight}px`;
+    if (textarea._zdAutosizePending) return;
+    textarea._zdAutosizePending = true;
+    requestAnimationFrame(() => {
+        textarea._zdAutosizePending = false;
+        textarea.style.height = "auto";
+        textarea.style.height = `${textarea.scrollHeight + textarea.offsetHeight - textarea.clientHeight}px`;
+    });
 }
 
 // An optimistic echo of what was just sent, so the message appears the moment
