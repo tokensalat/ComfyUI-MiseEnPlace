@@ -319,6 +319,19 @@ function resolveBundleKeys(node, visited = new Set()) {
     return null;
 }
 
+// Whether `node`'s bundle is ultimately sourced from `target`, walking back
+// through any Piercer chain in between. Used to scope an Unbundler resync to
+// the producer that actually changed, rather than every Unbundler in the
+// workflow - two unrelated Bundler/Unbundler pairs would otherwise cross-poke
+// each other's Unbundler (and whatever reads its outputs) on every edit.
+function bundleTracesTo(node, target, visited = new Set()) {
+    if (!node || visited.has(node)) return false;
+    visited.add(node);
+    if (node === target) return true;
+    if (node.type !== "Piercer") return false;
+    return bundleTracesTo(getSourceNode(node, "bundle"), target, visited);
+}
+
 // --- Unbundler -----------------------------------------------------------
 
 // How many sockets the node should show. Grows to the bundle's key count, but
@@ -436,11 +449,14 @@ function syncAllBundlingNodes() {
 }
 
 // A Bundler/Piercer whose sockets just changed also changes the key list every
-// downstream Unbundler shows, so refresh those too - quietly, since this is a
-// side effect of wiring something up rather than an explicit sync request.
+// Unbundler actually fed by it shows, so refresh those too - quietly, since
+// this is a side effect of wiring something up rather than an explicit sync
+// request. Scoped to `node`'s own chain (see bundleTracesTo): an unrelated
+// Bundler/Unbundler pair elsewhere in the workflow must not get touched.
 function syncDownstreamUnbundlers(node) {
     for (const other of allWorkflowNodes(node.graph)) {
-        if (other.type === "Unbundler") syncNode(other, true);
+        if (other.type !== "Unbundler") continue;
+        if (bundleTracesTo(getSourceNode(other, "bundle"), node)) syncNode(other, true);
     }
 }
 
