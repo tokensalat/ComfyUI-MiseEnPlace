@@ -413,6 +413,11 @@ class PromptBuilder(io.ComfyNode):
 
         with _STATE_LOCK:
             state = _STATE.setdefault(pid, _new_state())
+            # Captured before reset (if any) touches standing/state, so it is always
+            # "what this prompt actually looked like a moment ago" - the only baseline
+            # that means anything for "did this call change anything", regardless of
+            # whether reset was involved in getting to the new sections.
+            original_sections = state["sections"]
             # Worked out before anything is written, so that `strict` can still
             # raise on an operation that only turns out to be impossible once it
             # meets the standing prompt - an add whose name is already there -
@@ -429,21 +434,28 @@ class PromptBuilder(io.ComfyNode):
                 # Leaving the `with` releases the lock; the state is as it was.
                 raise ValueError(f"Prompt Builder [{pid}]: {'; '.join(errors)}")
 
-            if reset:
-                _STATE[pid] = state = _new_state()
-
-            # reset always records, even if the rebuilt prompt matches what was
-            # there before reset - it is an explicit, deliberate action the caller
-            # asked for directly, not something to fold away as "no change".
-            if operations and (reset or any(changes.values())):
-                note = "update after reset" if reset else "update"
-                version = _record(state, sections, changes, note, max_history, len(operations))
-            else:
-                # Either nothing usable came in, or every operation resolved to
-                # exactly what was already standing (e.g. state_json fed back
-                # unchanged) - re-render what is already there rather than
+            # `changes` alone can't tell "no change" from "reset, then rebuilt back
+            # to the same thing": reset forces `standing` to [], so merge() sees
+            # every section as freshly added regardless of whether the end result
+            # matches what was already there. Comparing the actual before/after
+            # sections catches that - e.g. an LLM resending the same full document
+            # every run through `reset=True` must not spend a version each time.
+            no_change = sections == original_sections
+            if no_change:
+                # Nothing about the resulting prompt differs from what was already
+                # standing - not reset, either (rebuilding to the exact content it
+                # would have discarded) - so there is nothing to record and nothing
+                # to throw away. Re-render what is already there rather than
                 # recording a redundant version or emitting an empty prompt.
                 version = _carry_forward(state, sections)
+            else:
+                if reset:
+                    _STATE[pid] = state = _new_state()
+                note = "update after reset" if reset else "update"
+                version = _record(
+                    state, sections, changes or {"added": [], "modified": [], "removed": []},
+                    note, max_history, len(operations),
+                )
             snapshot = _snapshot_locked(pid, state)
 
         if errors:

@@ -92,6 +92,97 @@ class TwoRunPersistenceTests(unittest.TestCase):
             self.PB.execute(prompt_json=add_doc, prompt_id="", max_history=50, reset=False, strict="false")
 
 
+class ResetRebuildStabilityTests(unittest.TestCase):
+    """Regression test for a report that the version number (and a new history
+    entry) kept incrementing on every run even though the upstream LLM's
+    prompt_json was confirmed byte-identical run to run.
+
+    Root cause: with reset=True, `standing` is forced to [] before merge()
+    runs, so every section in the rebuilt document shows up in changes["added"]
+    regardless of whether the end result matches what was already standing -
+    `any(changes.values())` can never be False in that case, so the old gate
+    (`reset or any(changes.values())`) always recorded a new version whenever
+    reset was on, no matter what the document actually said.
+    """
+
+    NODE_ID = "test-node-prompt-builder-reset-rebuild"
+
+    def setUp(self):
+        self.PB = prompt_builder.PromptBuilder
+        self.PB.hidden = SimpleNamespace(unique_id=self.NODE_ID)
+        prompt_builder._STATE.pop(f"__node_{self.NODE_ID}", None)
+
+    def test_resending_the_same_full_document_via_reset_does_not_bump_version(self):
+        doc = json.dumps([
+            {"section": "subject", "op": "add", "position": 0, "content": "a lighthouse keeper"},
+            {"section": "style", "op": "add", "position": 1, "content": "35mm film"},
+        ])
+
+        first = self.PB.execute(prompt_json=doc, prompt_id="", max_history=50, reset=True, strict=True)
+        _, _, _, first_version, _ = first.args
+
+        # Same document, same reset=True - simulating an LLM re-emitting the
+        # identical full prompt state on the next queue run.
+        second = self.PB.execute(prompt_json=doc, prompt_id="", max_history=50, reset=True, strict=True)
+        text2, _, _, second_version, sections_json2 = second.args
+
+        self.assertEqual(first_version, second_version, "an identical resend must not bump the version")
+        self.assertEqual(len(json.loads(sections_json2)), 2, "the sections must still be there, not wiped")
+        self.assertIn("lighthouse keeper", text2)
+
+    def test_resending_via_reset_with_genuinely_different_content_still_records(self):
+        first_doc = json.dumps([{"section": "subject", "op": "add", "position": 0, "content": "a fox"}])
+        second_doc = json.dumps([{"section": "subject", "op": "add", "position": 0, "content": "a wolf"}])
+
+        self.PB.execute(prompt_json=first_doc, prompt_id="", max_history=50, reset=True, strict=True)
+        # Each genuine reset restarts its own version numbering at 1, so two
+        # separate resets both landing on version 1 is expected - the thing
+        # that must hold is that the second, different document actually took
+        # effect rather than being wrongly treated as "no change".
+        second = self.PB.execute(prompt_json=second_doc, prompt_id="", max_history=50, reset=True, strict=True)
+        text2, _, _, second_version, sections_json2 = second.args
+
+        self.assertEqual(second_version, 1, "a genuine reset+change must record (not carry_forward)")
+        self.assertIn("a wolf", text2)
+        self.assertNotIn("a fox", text2)
+
+
+class DeleteThenReaddStabilityTests(unittest.TestCase):
+    """Regression test for the reset=False case of the same underlying bug:
+    an LLM that always represents its (possibly unchanged) desired prompt as
+    delete-then-re-add per section - since `modify` can never reposition a
+    section, delete+add is the only way to express "this section belongs
+    here" without assuming it wasn't already there. A plain re-`add` on an
+    untouched section is caught by merge()'s identical-content check, but
+    delete-then-add isn't: by the time the `add` runs, the section was just
+    deleted, so there's nothing to compare its content against - each
+    individual op is seen as a real change even when the net result is not.
+    """
+
+    NODE_ID = "test-node-prompt-builder-delete-readd"
+
+    def setUp(self):
+        self.PB = prompt_builder.PromptBuilder
+        self.PB.hidden = SimpleNamespace(unique_id=self.NODE_ID)
+        prompt_builder._STATE.pop(f"__node_{self.NODE_ID}", None)
+
+    def test_delete_then_readd_to_the_same_content_does_not_bump_version(self):
+        add_doc = json.dumps([{"section": "subject", "op": "add", "position": 0, "content": "a fox"}])
+        first = self.PB.execute(prompt_json=add_doc, prompt_id="", max_history=50, reset=False, strict=True)
+        _, _, _, first_version, _ = first.args
+
+        rebuild_doc = json.dumps([
+            {"section": "subject", "op": "delete"},
+            {"section": "subject", "op": "add", "position": 0, "content": "a fox"},
+        ])
+        second = self.PB.execute(prompt_json=rebuild_doc, prompt_id="", max_history=50, reset=False, strict=True)
+        text2, _, _, second_version, sections_json2 = second.args
+
+        self.assertEqual(first_version, second_version, "net-unchanged delete+readd must not bump the version")
+        self.assertIn("a fox", text2)
+        self.assertEqual(len(json.loads(sections_json2)), 1)
+
+
 class FingerprintStabilityTests(unittest.TestCase):
     """Regression test for a report that a PromptBuilder feeding a Bundler/
     Unbundler chain kept re-executing (and retriggering everything downstream,
