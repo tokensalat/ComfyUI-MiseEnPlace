@@ -46,6 +46,10 @@ class Bundler(io.ComfyNode):
         for i, value in enumerate(items.values()):
             key = names[i] if i < len(names) and names[i] else f"item{i}"
             bundle[key] = value
+        # Unconditional, so a re-execution with an unchanged graph is visible in the
+        # server console - if this line doesn't reappear on a requeue, this node was
+        # served from cache and whatever re-ran is downstream, not here.
+        print(f"[Bundler] keys={keys!r} -> {list(bundle.keys())}")
         return io.NodeOutput(bundle)
 
 

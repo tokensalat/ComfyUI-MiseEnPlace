@@ -42,9 +42,22 @@ class Unbundler(io.ComfyNode):
     def execute(cls, bundle, keys: str = "") -> io.NodeOutput:
         bundle = bundle or {}
         names = parse_keys(keys)
+        # Unconditional, so a re-execution with an unchanged graph is visible in the
+        # server console - if this line doesn't reappear on a requeue, this node was
+        # served from cache and whatever re-ran is downstream, not here.
+        print(f"[Unbundler] keys={keys!r}, bundle keys={list(bundle.keys())}")
         if len(names) > MAX_OUTPUTS:
             print(f"Unbundler: {len(names)} keys requested but only {MAX_OUTPUTS} outputs available; extra keys ignored.")
             names = names[:MAX_OUTPUTS]
+
+        if bundle:
+            if not names:
+                print(f"Unbundler: 'keys' is empty but the incoming bundle has keys {list(bundle.keys())}; every output will be None. "
+                      "If 'keys' is exposed through a subgraph boundary, check it didn't default to an unconnected/empty value.")
+            else:
+                missing = [name for name in names if name and name not in bundle]
+                if missing:
+                    print(f"Unbundler: key(s) {missing} not found in bundle; available keys: {list(bundle.keys())}. Outputting None for them.")
 
         values = [bundle.get(name) if name else None for name in names]
         values += [None] * (MAX_OUTPUTS - len(values))
