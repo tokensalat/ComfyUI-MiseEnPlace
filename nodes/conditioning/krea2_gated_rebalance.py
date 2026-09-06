@@ -38,11 +38,11 @@ class Krea2GatedRebalance:
                 "multiplier": (
                     "FLOAT",
                     {
-                        "default": 4.0,
+                        "default": 1.0,
                         "min": -1e9,
                         "max": 1e9,
                         "step": 0.01,
-                        "tooltip": "Flat gain applied on top of the per-tap weights - Krea2's raw conditioning is small in magnitude, so this is normally >1.",
+                        "tooltip": "Flat gain applied on top of the per-tap weights - Krea2's raw conditioning is small in magnitude, so you'll likely want this >1.",
                     },
                 ),
                 "crossover": (
