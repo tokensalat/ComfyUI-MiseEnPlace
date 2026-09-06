@@ -3,12 +3,14 @@ import torch
 # Z-Image Turbo conditions on a single Qwen3-4B hidden state (one tensor), not
 # a stack of concatenated encoder taps the way Krea2 does - so Krea2GatedRebalance's
 # per-tap axis has nothing to act on here. Ported from DonutsDelivery/ComfyUI-DonutNodes'
-# DonutZitConditioningRebalance.py: a global gain on the embedding, plus optional
-# gains spread as contiguous bands across its feature channels (e.g. 2560 dims) -
-# the closest analog to per-layer weighting available on a single-layer conditioning.
-# This scales the cross-attention K/V source (Comfy's convert_cond takes index 0 of
-# each conditioning pair as `cross_attn` verbatim), which is why it matters most for
-# distilled turbo models pinned at CFG 1, where CFG offers no strength control.
+# DonutZitConditioningRebalance.py, minus its "multiplier" - Z-Image's NextDiT.cap_embedder
+# (comfy/ldm/lumina/model.py) starts with RMSNorm(cap_feats) before anything else, and
+# RMSNorm(c*x) == RMSNorm(x) for any positive c: a flat gain on the whole embedding is
+# provably cancelled the instant it reaches the model, unlike Krea2's txtfusion (which
+# combines taps through residual blocks - x = x + attn(prenorm(x)) - so a flat gain there
+# actually survives). Only per_channel_weights carries over: RMSNorm collapses everything
+# to one scalar magnitude per token, but doesn't erase the *relative* weighting between
+# channels introduced beforehand, so uneven bands still have a real effect.
 
 
 class ZitConditioningRebalance:
@@ -17,21 +19,11 @@ class ZitConditioningRebalance:
         return {
             "required": {
                 "conditioning": ("CONDITIONING",),
-                "multiplier": (
-                    "FLOAT",
-                    {
-                        "default": 1.0,
-                        "min": -1e9,
-                        "max": 1e9,
-                        "step": 0.01,
-                        "tooltip": "Global gain on the embedding fed to cross-attention. >1 strengthens prompt adherence; 1.0 = no change.",
-                    },
-                ),
                 "per_channel_weights": (
                     "STRING",
                     {
                         "default": "",
-                        "tooltip": "Optional comma/semicolon list of gains spread as contiguous bands across the embedding's feature channels (e.g. 2560 dims). Empty = uniform. Multiplies on top of multiplier.",
+                        "tooltip": "Comma/semicolon list of gains spread as contiguous bands across the embedding's feature channels (e.g. 2560 dims). Empty = uniform (no-op).",
                     },
                 ),
             }
@@ -54,8 +46,7 @@ class ZitConditioningRebalance:
             return []
         return weights
 
-    def _scale_tensor(self, t, weights, multiplier):
-        t = t * multiplier
+    def _scale_tensor(self, t, weights):
         if not weights:
             return t
         # band i covers a contiguous range of channels; works for any k <= d
@@ -66,7 +57,7 @@ class ZitConditioningRebalance:
         gains = torch.tensor(weights, dtype=torch.float32, device=t.device)[idx]
         return (t.float() * gains).to(orig_dtype)
 
-    def _apply(self, structure, weights, multiplier):
+    def _apply(self, structure, weights):
         if isinstance(structure, list):
             out = []
             for item in structure:
@@ -74,18 +65,18 @@ class ZitConditioningRebalance:
                         and isinstance(item[0], torch.Tensor)
                         and isinstance(item[1], dict)):
                     cond_t, extras = item
-                    out.append([self._scale_tensor(cond_t, weights, multiplier), dict(extras)])
+                    out.append([self._scale_tensor(cond_t, weights), dict(extras)])
                 else:
-                    out.append(self._apply(item, weights, multiplier))
+                    out.append(self._apply(item, weights))
             return out
         if isinstance(structure, torch.Tensor):
-            return self._scale_tensor(structure, weights, multiplier)
+            return self._scale_tensor(structure, weights)
         return structure
 
-    def run(self, conditioning, multiplier, per_channel_weights=""):
+    def run(self, conditioning, per_channel_weights=""):
         weights = self._parse_weights(per_channel_weights)
-        print(f"[ZitConditioningRebalance] multiplier={multiplier}, {len(weights)} channel band(s)" if weights else f"[ZitConditioningRebalance] multiplier={multiplier}, uniform (no per-channel weights)")
-        return (self._apply(conditioning, weights, multiplier),)
+        print(f"[ZitConditioningRebalance] {len(weights)} channel band(s)" if weights else "[ZitConditioningRebalance] uniform (no per-channel weights) - no-op")
+        return (self._apply(conditioning, weights),)
 
 
 NODE_CLASS_MAPPINGS = {"ZitConditioningRebalance": ZitConditioningRebalance}
