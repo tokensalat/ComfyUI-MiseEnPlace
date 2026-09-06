@@ -6,19 +6,44 @@ KREA2_HIDDEN_DIM = 2560
 KREA2_FEATURE_DIM = KREA2_N_TAPS * KREA2_HIDDEN_DIM  # 30720
 
 
+# Krea2's 12 taps read hidden_states[2,5,8,11,14,17,20,23,26,29,32,35] of Qwen3-VL-4B.
+# Grouped by where the model's own learned tap-combination weights (txtfusion.projector)
+# actually differ: taps 0-6 sit near baseline, taps 7-10 are the strongly-weighted
+# (large-magnitude, negative) cluster, tap 11 is the last one before the DiT.
+KREA2_GROUPS = [
+    ("early", [2, 5, 8, 11, 14, 17, 20]),
+    ("detail", [23, 26, 29, 32]),
+    ("refinement", [35]),
+]
+
+
 class Krea2GatedRebalance:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
                 "conditioning": ("CONDITIONING",),
-                "per_layer_weights": (
+                "early_weights_7": (
                     "STRING",
-                    {"default": "1,1,1,1,1,1,1,2.5,5,1.1,4,1"},
+                    {"default": "1,1,1,1,1,1,1", "tooltip": "one per tap, layers 2,5,8,11,14,17,20 of Qwen3-VL-4B"},
+                ),
+                "detail_weights_4": (
+                    "STRING",
+                    {"default": "2.5,5,1.1,4", "tooltip": "one per tap, layers 23,26,29,32 of Qwen3-VL-4B"},
+                ),
+                "refinement_weights_1": (
+                    "STRING",
+                    {"default": "1", "tooltip": "the last tap, layer 35 of Qwen3-VL-4B"},
                 ),
                 "multiplier": (
                     "FLOAT",
-                    {"default": 4.0, "min": -1e9, "max": 1e9, "step": 0.01},
+                    {
+                        "default": 4.0,
+                        "min": -1e9,
+                        "max": 1e9,
+                        "step": 0.01,
+                        "tooltip": "Flat gain applied on top of the per-tap weights - Krea2's raw conditioning is small in magnitude, so this is normally >1.",
+                    },
                 ),
                 "crossover": (
                     "FLOAT",
@@ -37,10 +62,16 @@ class Krea2GatedRebalance:
     CATEGORY = "MiseEnPlace/Conditioning"
 
     def _parse_weights(self, s):
+        """Comma/semicolon separated weights."""
+        weights = []
         try:
-            return [float(x.strip()) for x in s.replace(";", ",").split(",") if x.strip()]
+            for tok in (x.strip() for x in s.replace(";", ",").split(",")):
+                if not tok:
+                    continue
+                weights.append(float(tok))
         except ValueError:
             return []
+        return weights
 
     def _blend_weights(self, weights, crossover, overlap):
         """Apply crossover/overlap smooth-step to each tap's weight.
@@ -109,15 +140,17 @@ class Krea2GatedRebalance:
             return self._scale_tensor(structure, weights, multiplier)
         return structure
 
-    def run(self, conditioning, per_layer_weights, multiplier, crossover, overlap):
-        weights = self._parse_weights(per_layer_weights)
-        if not weights:
-            return (conditioning,)
-        if len(weights) != KREA2_N_TAPS:
-            raise ValueError(
-                f"[Krea2GatedRebalance] per_layer_weights has {len(weights)} values, "
-                f"expected {KREA2_N_TAPS} (one per tap)"
-            )
+    def run(self, conditioning, early_weights_7, detail_weights_4, refinement_weights_1, multiplier, crossover, overlap):
+        group_strings = [early_weights_7, detail_weights_4, refinement_weights_1]
+        weights = []
+        for (name, layers), group_s in zip(KREA2_GROUPS, group_strings):
+            group_weights = self._parse_weights(group_s)
+            if len(group_weights) != len(layers):
+                raise ValueError(
+                    f"[Krea2GatedRebalance] '{name}_weights' needs exactly {len(layers)} value(s) "
+                    f"(layers {', '.join(map(str, layers))}) - got {len(group_weights)}"
+                )
+            weights.extend(group_weights)
 
         weights = self._blend_weights(weights, crossover, overlap)
         print(f"[Krea2GatedRebalance] effective weights: {[round(w,3) for w in weights]}, multiplier={multiplier}")
