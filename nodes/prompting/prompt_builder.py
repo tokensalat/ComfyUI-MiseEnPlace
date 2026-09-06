@@ -18,10 +18,10 @@ contain.
 
 The `state_json` output is that same idea from the other side: the whole
 standing prompt, expressed as one `add` per section at its current position.
-Feeding it back in without `reset` fails every entry with "already exists",
-because from the document's point of view every one of those sections is
-already there - `state_json` is meant to be replayed against an empty prompt,
-paired with `reset`, not merged into the one it came from.
+Feeding it back in unchanged is a no-op - each `add` finds the same content
+already there and is silently skipped, producing no new version - but if the
+standing prompt has since moved on, an entry that no longer matches is a
+genuine "already exists" conflict and is reported like any other stale `add`.
 
 `sections_json` is a third shape for the same prompt, and the one to reach for
 if you just want to read it rather than replay it: a plain object keyed by
@@ -234,6 +234,29 @@ def _record(state, sections, changes, note, max_history, num_edits=0):
     return version
 
 
+def _carry_forward(state, sections):
+    """A version dict for 'nothing to record' - the standing prompt re-rendered,
+    without bumping the revision or adding a history entry.
+
+    Used both when a document produced no usable operations at all and when
+    what it asked for turned out to already be the standing prompt (e.g.
+    state_json fed back unchanged) - in both cases there is nothing new to show,
+    so downstream nodes get the last good prompt rather than a redundant version.
+    """
+    state["sections"] = sections
+    text = render(sections)
+    return {
+        "index": state["revision"],
+        "text": text,
+        "added": [],
+        "modified": [],
+        "removed": [],
+        "num_edits": 0,
+        "length": len(text),
+        "previous_length": len(text),
+    }
+
+
 def restore(pid, index):
     """Make version `index` of prompt `pid` current again; (payload, status).
 
@@ -394,25 +417,19 @@ class PromptBuilder(io.ComfyNode):
 
             if reset:
                 _STATE[pid] = state = _new_state()
-            if operations:
+
+            # reset always records, even if the rebuilt prompt matches what was
+            # there before reset - it is an explicit, deliberate action the caller
+            # asked for directly, not something to fold away as "no change".
+            if operations and (reset or any(changes.values())):
                 note = "update after reset" if reset else "update"
                 version = _record(state, sections, changes, note, max_history, len(operations))
             else:
-                # Nothing usable came in. Re-render what is already there rather
-                # than emitting an empty prompt: downstream nodes are better
-                # served by the last good prompt than by nothing at all.
-                state["sections"] = sections
-                text = render(sections)
-                version = {
-                    "index": state["revision"],
-                    "text": text,
-                    "added": [],
-                    "modified": [],
-                    "removed": [],
-                    "num_edits": 0,
-                    "length": len(text),
-                    "previous_length": len(text),
-                }
+                # Either nothing usable came in, or every operation resolved to
+                # exactly what was already standing (e.g. state_json fed back
+                # unchanged) - re-render what is already there rather than
+                # recording a redundant version or emitting an empty prompt.
+                version = _carry_forward(state, sections)
             snapshot = _snapshot_locked(pid, state)
 
         if errors:

@@ -29,7 +29,9 @@ Three operations, and each names exactly the fields it needs:
 add
     Inserts a new section. `content` is its text; `position` says where - see
     `_resolve_position` for exactly how a position is read. The section must
-    not already exist.
+    not already exist, unless it is already there with exactly this content -
+    that restates the standing prompt rather than conflicting with it, so it
+    is a silent no-op instead of an error.
 modify
     Changes an existing section's `content` in place. Never repositions it -
     only `add` can say where something goes, so a section stays where it was
@@ -362,6 +364,12 @@ def merge(current, operations):
 
         if op == "add":
             if at is not None:
+                if sections[at]["content"] == operation["content"]:
+                    # Already there with exactly this content - e.g. state_json fed
+                    # back unchanged. That restates the standing prompt rather than
+                    # betraying a stale view of it, so it is a silent no-op, not the
+                    # "already exists" error a genuinely different add gets below.
+                    continue
                 errors.append(f"'{name}' already exists; use 'modify' to change it")
                 continue
             index = _resolve_position(operation["position"], len(sections))
