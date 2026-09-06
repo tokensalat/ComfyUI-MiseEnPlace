@@ -19,6 +19,13 @@ class ZitBlockGatedRebalance:
     patches the MODEL, scaling each block's own residual contribution via ComfyUI's
     "double_block" patch hook (comfy/ldm/lumina/model.py): block_out = block_in + weight * (block_out - block_in).
     weight=1 -> unchanged, weight=0 -> skip the block, weight>1 -> amplify it.
+
+    The hook's own `img_input` is NOT "this block's input" - comfy captures it once before the
+    block loop starts and passes the same (pre-block-0) tensor to every call, as a stable anchor
+    for ControlNet-style additive patches (see DiffSynthCnetPatch/WanUni3CCnetPatch in
+    comfy_extras/nodes_model_patch.py). Using it directly as `block_in` would interpolate every
+    block against the ORIGINAL embedding instead of its own input, so a run() closure tracks the
+    true per-block input itself, seeded from `img_input` only for block 0.
     """
 
     @classmethod
@@ -115,12 +122,25 @@ class ZitBlockGatedRebalance:
         weights = [w * multiplier for w in weights]
         print(f"[ZitBlockGatedRebalance] effective per-block weights: {[round(w, 3) for w in weights]}, multiplier={multiplier}")
 
+        # img_input is a fixed pre-block-0 reference (see class docstring), not this
+        # block's own input - track the real per-block input across calls ourselves.
+        # Blocks run strictly in order within one forward pass, and block_index resets
+        # to 0 at the start of the next one, so state["prev"] never needs an explicit reset.
+        state = {"prev": None}
+
         def double_block_patch(args):
             i = args["block_index"]
             w = weights[i] if i < len(weights) else 1.0
-            if w == 1.0 or "img" not in args or "img_input" not in args:
+            if "img" not in args or "img_input" not in args:
                 return {}
-            return {"img": args["img_input"] + w * (args["img"] - args["img_input"])}
+            block_in = args["img_input"] if i == 0 else state["prev"]
+            block_out = args["img"]
+            if w == 1.0:
+                state["prev"] = block_out
+                return {}
+            scaled = block_in + w * (block_out - block_in)
+            state["prev"] = scaled
+            return {"img": scaled}
 
         m = model.clone()
         m.set_model_double_block_patch(double_block_patch)
