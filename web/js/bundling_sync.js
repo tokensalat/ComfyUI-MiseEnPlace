@@ -54,6 +54,27 @@ function graphNodes(graph) {
     return graph?.nodes ?? graph?._nodes ?? [];
 }
 
+// graph.nodes only lists the top level - a node placed inside a Subgraph only
+// shows up via its wrapper SubgraphNode's `.subgraph`. Bundling nodes nested in
+// a subgraph still need syncing (on load, and on "Sync All"), so walk into
+// every placed subgraph too. `seen` is keyed by subgraph definition, not
+// wrapper node, since one definition can be placed more than once.
+function collectNodesRecursive(graph, out = [], seen = new Set()) {
+    if (!graph || seen.has(graph)) return out;
+    seen.add(graph);
+    for (const node of graphNodes(graph)) {
+        out.push(node);
+        if (typeof node.isSubgraphNode === "function" && node.isSubgraphNode() && node.subgraph) {
+            collectNodesRecursive(node.subgraph, out, seen);
+        }
+    }
+    return out;
+}
+
+function allWorkflowNodes(graph) {
+    return collectNodesRecursive(graph?.rootGraph ?? graph);
+}
+
 // graph.links is a Map in some litegraph versions and a plain object/array in
 // others (and may live under the private `_links` name instead) - graph.getLink()
 // is the version-agnostic way to look one up when available.
@@ -67,43 +88,86 @@ function getLinkById(graph, linkId) {
 
 // --- upstream resolution -------------------------------------------------
 
-// The output slot object a link ultimately comes from, hopping through Reroutes.
-// Newer litegraph resolves a link's origin via link.resolve(graph) (needed for
-// e.g. subgraph-crossing links); older versions don't have that method, so fall
-// back to the direct origin_id/origin_slot lookup in that case.
-function traceOriginOutput(node, link, depth = 0) {
-    if (!link || depth > MAX_TRACE_DEPTH) return null;
-    const graph = node.graph;
-    let output = null;
-    if (typeof link.resolve === "function") {
-        const resolved = link.resolve(graph);
-        output = resolved?.subgraphInput ?? resolved?.output ?? null;
-    }
-    const originNode = graph?.getNodeById(link.origin_id);
-    if (!output) output = originNode?.outputs?.[link.origin_slot] ?? null;
-    if (originNode && REROUTE_TYPES.has(originNode.type)) {
-        const upstreamLink = getLinkById(originNode.graph, originNode.inputs?.[0]?.link);
-        const upstream = traceOriginOutput(originNode, upstreamLink, depth + 1);
-        if (upstream) return upstream;
-    }
-    return output;
+// Fixed sentinel node ids litegraph gives every subgraph's own boundary nodes
+// (SubgraphInputNode / SubgraphOutputNode) - same two values for every
+// subgraph in the workflow, never a real node id. A link whose origin_id is
+// SUBGRAPH_INPUT_ID means "the real value is outside this subgraph".
+const SUBGRAPH_INPUT_ID = -10;
+
+// A Subgraph definition (the thing holding the nodes you see when you open
+// one) keeps no back-reference to whatever SubgraphNode(s) place it on a
+// canvas - litegraph allows one definition to be placed more than once. So
+// finding "the" placement means searching the whole node tree; 0 or 2+
+// matches means we can't tell which one to use and must give up cleanly
+// rather than guessing.
+function findSubgraphNodeInstances(subgraph) {
+    const root = subgraph.rootGraph ?? subgraph;
+    const found = [];
+    const seen = new Set();
+    (function walk(graph) {
+        if (!graph || seen.has(graph)) return;
+        seen.add(graph);
+        for (const node of graphNodes(graph)) {
+            if (typeof node.isSubgraphNode === "function" && node.isSubgraphNode()) {
+                if (node.subgraph === subgraph) found.push(node);
+                walk(node.subgraph);
+            }
+        }
+    })(root);
+    return found;
 }
 
-// The node feeding a named input, hopping through Reroutes. Used for "bundle"
-// inputs, where we need the Bundler/Piercer itself rather than its output slot.
-function getSourceNode(node, inputName) {
-    let current = node;
-    let linkId = node.inputs?.find((i) => i.name === inputName)?.link;
-    for (let depth = 0; depth <= MAX_TRACE_DEPTH; depth++) {
-        const link = getLinkById(current.graph, linkId);
-        if (!link) return null;
-        const origin = current.graph?.getNodeById(link.origin_id);
-        if (!origin) return null;
-        if (!REROUTE_TYPES.has(origin.type)) return origin;
-        current = origin;
-        linkId = origin.inputs?.[0]?.link;
+// Resolves a link to whatever actually produces its value: the origin node,
+// its output slot, and the graph that node lives in. Hops through Reroutes
+// (same graph) and subgraph boundaries in both directions - into a placed
+// Subgraph's output pin to find the real producer inside it, and out of a
+// subgraph's own input pin to find whatever feeds the wrapping SubgraphNode
+// in its parent graph. Returns null if the chain is unresolvable (dangling
+// link, depth exceeded, or a subgraph placed more than once).
+function resolveUpstream(graph, link, depth = 0) {
+    if (!link || !graph || depth > MAX_TRACE_DEPTH) return null;
+
+    if (link.origin_id === SUBGRAPH_INPUT_ID) {
+        const instances = findSubgraphNodeInstances(graph);
+        if (instances.length !== 1) return null;
+        const wrapper = instances[0];
+        const parentInput = wrapper.inputs?.[link.origin_slot];
+        const parentLink = parentInput?.link != null ? getLinkById(wrapper.graph, parentInput.link) : null;
+        return resolveUpstream(wrapper.graph, parentLink, depth + 1);
     }
-    return null;
+
+    const originNode = graph.getNodeById(link.origin_id);
+    if (!originNode) return null;
+
+    if (typeof originNode.isSubgraphNode === "function" && originNode.isSubgraphNode()) {
+        const inner = originNode.subgraph;
+        const exposedOutput = inner?.outputs?.[link.origin_slot];
+        const innerLinkId = exposedOutput?.linkIds?.[0];
+        const innerLink = innerLinkId != null ? getLinkById(inner, innerLinkId) : null;
+        return resolveUpstream(inner, innerLink, depth + 1);
+    }
+
+    if (REROUTE_TYPES.has(originNode.type)) {
+        const upstreamLink = getLinkById(graph, originNode.inputs?.[0]?.link);
+        const upstream = resolveUpstream(graph, upstreamLink, depth + 1);
+        if (upstream) return upstream;
+    }
+
+    return { node: originNode, output: originNode.outputs?.[link.origin_slot] ?? null, graph };
+}
+
+// The output slot object a link ultimately comes from - see resolveUpstream.
+function traceOriginOutput(node, link) {
+    return resolveUpstream(node.graph, link)?.output ?? null;
+}
+
+// The node feeding a named input, crossing Reroutes and subgraph boundaries.
+// Used for "bundle" inputs, where we need the Bundler/Piercer itself rather
+// than its output slot.
+function getSourceNode(node, inputName) {
+    const linkId = node.inputs?.find((i) => i.name === inputName)?.link;
+    const link = getLinkById(node.graph, linkId);
+    return resolveUpstream(node.graph, link)?.node ?? null;
 }
 
 // --- dynamic (Autogrow) socket sync --------------------------------------
@@ -242,11 +306,14 @@ function resolvePiercerKeys(node, visited) {
 }
 
 // What keys a BUNDLE produced by `node` currently carries. Returns null if the
-// chain can't be resolved (unknown node type feeding the bundle).
+// chain can't be resolved (unknown node type feeding the bundle). Keyed by
+// node object rather than node.id: a Piercer chain can now cross into a
+// subgraph, whose nodes number their ids independently of the parent graph,
+// so two different nodes sharing an id must not look like the same visit.
 function resolveBundleKeys(node, visited = new Set()) {
     if (!node) return [];
-    if (visited.has(node.id)) return [];
-    visited.add(node.id);
+    if (visited.has(node)) return [];
+    visited.add(node);
     if (node.type === "Bundler") return resolveBundlerKeys(node);
     if (node.type === "Piercer") return resolvePiercerKeys(node, visited);
     return null;
@@ -349,7 +416,7 @@ function syncNode(node, quiet = false) {
 // beyond that ordering is irrelevant: nothing here overwrites a widget that
 // another node reads as its own source of truth.
 function syncGraph(graph, quiet) {
-    const nodes = graphNodes(graph);
+    const nodes = allWorkflowNodes(graph);
     const producers = nodes.filter((n) => DYNAMIC_PREFIXES[n.type]);
     const unbundlers = nodes.filter((n) => n.type === "Unbundler");
     let synced = 0;
@@ -372,7 +439,7 @@ function syncAllBundlingNodes() {
 // downstream Unbundler shows, so refresh those too - quietly, since this is a
 // side effect of wiring something up rather than an explicit sync request.
 function syncDownstreamUnbundlers(node) {
-    for (const other of graphNodes(node.graph)) {
+    for (const other of allWorkflowNodes(node.graph)) {
         if (other.type === "Unbundler") syncNode(other, true);
     }
 }
