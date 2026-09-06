@@ -175,7 +175,7 @@ def _resolve_prompt_id(prompt_id, unique_id):
 
 
 def _new_state():
-    return {"revision": 0, "sections": [], "history": []}
+    return {"revision": 0, "sections": [], "history": [], "external_revision": 0}
 
 
 def _snapshot_locked(pid, state):
@@ -288,6 +288,10 @@ def restore(pid, index):
         # under the very click that restores from it. max_history is enforced
         # on execute().
         _record(state, restored, changes, f"restored v{index}", 0)
+        # Moved the standing prompt without a queue run to show for it - see
+        # fingerprint_inputs()'s docstring for why this is tracked separately
+        # from `revision`.
+        state["external_revision"] += 1
         return _snapshot_locked(pid, state), 200
 
 
@@ -357,16 +361,26 @@ class PromptBuilder(io.ComfyNode):
 
     @classmethod
     def fingerprint_inputs(cls, prompt_json="", prompt_id="", **kwargs):
-        """Re-run whenever the stored prompt has moved, not just the inputs.
+        """Re-run whenever the stored prompt moved out-of-band, not just the inputs.
 
-        Without this, restoring an old version from the node's UI and re-queueing
-        an otherwise unchanged graph would be answered from cache with the
-        superseded prompt - the one thing the history is there to prevent.
+        Without this, restoring an old version from the node's UI (or clearing state)
+        and re-queueing an otherwise unchanged graph would be answered from cache with
+        the superseded prompt - the one thing the history is there to prevent.
+
+        Keyed on `external_revision`, NOT the general `revision` counter that every
+        ordinary execute() bumps too: this is called to decide whether to execute
+        BEFORE that call runs, so the key gets computed against revision-before-N,
+        but a normal execute() bumps revision as a side effect of running - so the
+        very next queue's check would read revision-after-N and never match, forcing
+        a spurious re-execution one queue after every real edit even with byte-identical
+        inputs (and cascading downstream to whatever reads this node's output). Only
+        restore()/clearing the state move `external_revision`, since those are the
+        only ways the standing prompt changes without a corresponding queue.
         """
         pid = _resolve_prompt_id(prompt_id, getattr(cls.hidden, "unique_id", None))
         with _STATE_LOCK:
-            revision = _STATE.get(pid, {}).get("revision", 0)
-        return f"{revision}:{json.dumps([prompt_json, kwargs], sort_keys=True, default=repr)}"
+            external_revision = _STATE.get(pid, {}).get("external_revision", 0)
+        return f"{external_revision}:{json.dumps([prompt_json, kwargs], sort_keys=True, default=repr)}"
 
     @classmethod
     def execute(

@@ -92,5 +92,59 @@ class TwoRunPersistenceTests(unittest.TestCase):
             self.PB.execute(prompt_json=add_doc, prompt_id="", max_history=50, reset=False, strict="false")
 
 
+class FingerprintStabilityTests(unittest.TestCase):
+    """Regression test for a report that a PromptBuilder feeding a Bundler/
+    Unbundler chain kept re-executing (and retriggering everything downstream,
+    e.g. CLIP Text Encode) on a requeue with a completely unchanged prompt_json.
+
+    Root cause: fingerprint_inputs() used to key on the general `revision`
+    counter, which execute()'s own _record() call bumps as a side effect of
+    running. The cache key for run N is computed (and stored) against
+    revision-before-N, but the very next queue's cache-check reads
+    revision-after-N (already bumped) - guaranteeing a mismatch, and therefore
+    a spurious re-execution, exactly one queue after any real edit even with
+    byte-identical inputs both times.
+    """
+
+    NODE_ID = "test-node-prompt-builder-fingerprint"
+
+    def setUp(self):
+        self.PB = prompt_builder.PromptBuilder
+        self.PB.hidden = SimpleNamespace(unique_id=self.NODE_ID)
+        self.pid = f"__node_{self.NODE_ID}"
+        prompt_builder._STATE.pop(self.pid, None)
+
+    def _fingerprint(self, prompt_json):
+        return self.PB.fingerprint_inputs(
+            prompt_json=prompt_json, prompt_id="", max_history=50, reset=False, strict=True
+        )
+
+    def test_fingerprint_unchanged_by_a_real_execute_in_between(self):
+        doc = json.dumps([{"section": "subject", "op": "add", "position": 0, "content": "x"}])
+
+        before = self._fingerprint(doc)
+        self.PB.execute(prompt_json=doc, prompt_id="", max_history=50, reset=False, strict=True)
+        after = self._fingerprint(doc)
+
+        self.assertEqual(before, after, "a normal execute() must not change its own next fingerprint")
+
+    def test_fingerprint_changes_after_an_out_of_band_restore(self):
+        first_doc = json.dumps([{"section": "subject", "op": "add", "position": 0, "content": "x"}])
+        second_doc = json.dumps([{"section": "subject", "op": "modify", "content": "y"}])
+
+        self.PB.execute(prompt_json=first_doc, prompt_id="", max_history=50, reset=False, strict=True)
+        self.PB.execute(prompt_json=second_doc, prompt_id="", max_history=50, reset=False, strict=True)
+
+        fp_before_restore = self._fingerprint(first_doc)
+        payload, status = prompt_builder.restore(self.pid, 1)
+        self.assertEqual(status, 200)
+        fp_after_restore = self._fingerprint(first_doc)
+
+        self.assertNotEqual(
+            fp_before_restore, fp_after_restore,
+            "restoring an old version must invalidate the cache even though prompt_json didn't change",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
