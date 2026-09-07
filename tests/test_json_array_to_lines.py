@@ -39,6 +39,11 @@ class JsonArrayToLinesTests(unittest.TestCase):
         lines, count = self.node.run('{"a": 1}', 0)
         self.assertEqual((lines, count), ("", 0))
 
+    def test_custom_delimiter_is_unescaped_and_used(self):
+        lines, count = self.node.run('["a", "b", "c"]', 0, delimiter="\\t")
+        self.assertEqual(lines, "a\tb\tc")
+        self.assertEqual(count, 3)
+
 
 if __name__ == "__main__":
     unittest.main()
