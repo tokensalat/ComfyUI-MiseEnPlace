@@ -360,7 +360,7 @@ class PromptBuilder(io.ComfyNode):
         )
 
     @classmethod
-    def fingerprint_inputs(cls, prompt_json="", prompt_id="", **kwargs):
+    def fingerprint_inputs(cls, prompt_json="", prompt_id="", reset=False, **kwargs):
         """Re-run whenever the stored prompt moved out-of-band, not just the inputs.
 
         Without this, restoring an old version from the node's UI (or clearing state)
@@ -376,11 +376,46 @@ class PromptBuilder(io.ComfyNode):
         inputs (and cascading downstream to whatever reads this node's output). Only
         restore()/clearing the state move `external_revision`, since those are the
         only ways the standing prompt changes without a corresponding queue.
+
+        Beyond that, the fingerprint is keyed on the sections a document would
+        *produce* against the standing prompt, not the document's raw text. Two
+        documents that read differently - reordered noise, a delete-then-readd, a
+        resend of state_json with different formatting - but land on the same
+        sections must fingerprint the same, or a no-op resend still looks like a
+        change: ComfyUI computes a downstream node's cache key from its ancestors'
+        fingerprints, not their runtime output values, so a fingerprint that moves
+        on every resend re-executes this node and cascades a "changed" re-run to
+        everything downstream even though execute() would end up carrying the
+        exact same prompt forward. A document that fails to parse, hits a merge
+        error, or arrives with a non-bool `reset` can't be dry-run safely, so those
+        fall back to hashing the raw input - forcing execute() to actually run and
+        surface the problem.
         """
         pid = _resolve_prompt_id(prompt_id, getattr(cls.hidden, "unique_id", None))
         with _STATE_LOCK:
-            external_revision = _STATE.get(pid, {}).get("external_revision", 0)
-        return f"{external_revision}:{json.dumps([prompt_json, kwargs], sort_keys=True, default=repr)}"
+            state = _STATE.get(pid)
+            external_revision = state["external_revision"] if state else 0
+            standing_now = state["sections"] if state else []
+
+        def raw_fallback():
+            return f"{external_revision}:{json.dumps([prompt_json, reset, kwargs], sort_keys=True, default=repr)}"
+
+        if not isinstance(reset, bool):
+            return raw_fallback()
+
+        operations, errors = parse_document(prompt_json)
+        if errors:
+            return raw_fallback()
+
+        standing = [] if reset else standing_now
+        if operations:
+            sections, _changes, merge_errors = merge(standing, operations)
+            if merge_errors:
+                return raw_fallback()
+        else:
+            sections = standing
+
+        return f"{external_revision}:{json.dumps(sections, sort_keys=True)}"
 
     @classmethod
     def execute(

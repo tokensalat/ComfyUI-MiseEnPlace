@@ -236,6 +236,27 @@ class FingerprintStabilityTests(unittest.TestCase):
             "restoring an old version must invalidate the cache even though prompt_json didn't change",
         )
 
+    def test_fingerprint_stable_across_differently_worded_no_op_resends(self):
+        """A resend that nets to no change must fingerprint the same even when its
+        raw text differs, or ComfyUI's cache treats it as a change anyway - and
+        since a downstream node's cache key is built from its ancestors'
+        fingerprints, not their actual output values, that cascades a spurious
+        re-execution to everything reading this node's output.
+        """
+        add_doc = json.dumps([{"section": "subject", "op": "add", "position": 0, "content": "a fox"}])
+        self.PB.execute(prompt_json=add_doc, prompt_id="", max_history=50, reset=False, strict=True)
+
+        # Same net result, worded as delete-then-readd instead of a plain resend.
+        delete_readd_doc = json.dumps([
+            {"section": "subject", "op": "delete"},
+            {"section": "subject", "op": "add", "position": 0, "content": "a fox"},
+        ])
+
+        self.assertEqual(
+            self._fingerprint(add_doc), self._fingerprint(delete_readd_doc),
+            "two documents that both leave the prompt unchanged must fingerprint the same",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
