@@ -53,6 +53,12 @@ class Krea2GatedRebalance:
                     "FLOAT",
                     {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01},
                 ),
+                # Last, so loading an existing saved workflow doesn't shift any
+                # other widget's positional slot in widgets_values.
+                "bypass": (
+                    "BOOLEAN",
+                    {"default": False, "tooltip": "On: pass the conditioning through unchanged, skip the rebalance."},
+                ),
             }
         }
 
@@ -140,7 +146,11 @@ class Krea2GatedRebalance:
             return self._scale_tensor(structure, weights, multiplier)
         return structure
 
-    def run(self, conditioning, early_weights_7, detail_weights_4, refinement_weights_1, multiplier, crossover, overlap):
+    def run(self, conditioning, early_weights_7, detail_weights_4, refinement_weights_1, multiplier, crossover, overlap, bypass=False):
+        if bypass:
+            print("[Krea2GatedRebalance] bypassed - conditioning passed through unchanged")
+            return (conditioning,)
+
         group_strings = [early_weights_7, detail_weights_4, refinement_weights_1]
         weights = []
         for (name, layers), group_s in zip(KREA2_GROUPS, group_strings):

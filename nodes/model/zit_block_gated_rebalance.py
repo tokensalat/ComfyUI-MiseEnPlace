@@ -63,6 +63,12 @@ class ZitBlockGatedRebalance:
                     "FLOAT",
                     {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01},
                 ),
+                # Last, so loading an existing saved workflow doesn't shift any
+                # other widget's positional slot in widgets_values.
+                "bypass": (
+                    "BOOLEAN",
+                    {"default": False, "tooltip": "On: pass the model through unchanged, skip the rebalance."},
+                ),
             }
         }
 
@@ -106,7 +112,11 @@ class ZitBlockGatedRebalance:
 
         return blended
 
-    def run(self, model, early_weights_10, mid_weights_10, late_weights_10, multiplier, crossover, overlap):
+    def run(self, model, early_weights_10, mid_weights_10, late_weights_10, multiplier, crossover, overlap, bypass=False):
+        if bypass:
+            print("[ZitBlockGatedRebalance] bypassed - model passed through unchanged")
+            return (model,)
+
         group_strings = [early_weights_10, mid_weights_10, late_weights_10]
         weights = []
         for (name, blocks), group_s in zip(ZIT_GROUPS, group_strings):

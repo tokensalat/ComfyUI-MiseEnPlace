@@ -60,5 +60,17 @@ class DoubleBlockPatchStateTests(unittest.TestCase):
         self.assertNotEqual(effective[10], 0)
 
 
+class BypassTests(unittest.TestCase):
+    def test_bypass_returns_the_same_model_object_unpatched(self):
+        node = ZitBlockGatedRebalance()
+        model = FakeModel()
+        # A weight that would otherwise change block 0's output, to prove bypass
+        # skips the rebalance rather than merely computing a no-op patch.
+        (out,) = node.run(model, "0,1,1,1,1,1,1,1,1,1", "1,1,1,1,1,1,1,1,1,1",
+                           "1,1,1,1,1,1,1,1,1,1", 1.0, crossover=0.0, overlap=0.0, bypass=True)
+        self.assertIs(out, model)
+        self.assertFalse(hasattr(model, "patch"), "bypass must not touch the model at all")
+
+
 if __name__ == "__main__":
     unittest.main()

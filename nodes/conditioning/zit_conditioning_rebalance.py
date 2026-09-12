@@ -52,6 +52,12 @@ class ZitConditioningRebalance:
                     "FLOAT",
                     {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01},
                 ),
+                # Last, so loading an existing saved workflow doesn't shift any
+                # other widget's positional slot in widgets_values.
+                "bypass": (
+                    "BOOLEAN",
+                    {"default": False, "tooltip": "On: pass the conditioning through unchanged, skip the rebalance."},
+                ),
             }
         }
 
@@ -127,7 +133,11 @@ class ZitConditioningRebalance:
             return self._scale_tensor(structure, weights, mode)
         return structure
 
-    def run(self, conditioning, mode="multiply", per_channel_weights="", crossover=0.0, overlap=0.0):
+    def run(self, conditioning, mode="multiply", per_channel_weights="", crossover=0.0, overlap=0.0, bypass=False):
+        if bypass:
+            print("[ZitConditioningRebalance] bypassed - conditioning passed through unchanged")
+            return (conditioning,)
+
         weights = self._parse_weights(per_channel_weights)
         identity = 1.0 if mode == "multiply" else 0.0
         weights = self._blend_weights(weights, crossover, overlap, identity)
