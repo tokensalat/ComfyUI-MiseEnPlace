@@ -43,6 +43,18 @@ def install():
     io.Schema = Schema
     io.NodeOutput = NodeOutput
     io.Hidden = Hidden
+
+    def make_custom(io_type):
+        return type(
+            "Custom",
+            (),
+            {
+                "Input": staticmethod(lambda *a, **kw: None),
+                "Output": staticmethod(lambda *a, **kw: None),
+            },
+        )
+
+    io.Custom = make_custom
     for name in ("String", "Int", "Boolean", "AnyType"):
         placeholder = type(
             name,
